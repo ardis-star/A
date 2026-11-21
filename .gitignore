@@ -46,3 +46,4 @@ credentials/
 *.bak
 *.swp
 *~
+/logo/

@@ -1,0 +1,12 @@
+pkgbase = plus-a
+	pkgdesc = ASCENSION +A assembly language toolchain
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/ardis-star/A
+	arch = x86_64
+	license = custom
+	makedepends = rust
+	source = plus-a-1.0.0.tar.gz::https://github.com/ardis-star/A/archive/refs/tags/V1.0.0.tar.gz
+	sha256sums = 5a2780f62d4454c401ee4a449913d749e7e49dc06cf45b5bcf50f2f53f10795e
+
+pkgname = plus-a

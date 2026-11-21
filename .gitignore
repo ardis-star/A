@@ -47,3 +47,21 @@ credentials/
 *.swp
 *~
 /logo/
+
+# +A build outputs
+*.avm
+*.pkg.tar.zst
+*.tar.gz
+*.tgz
+
+# Compiled binaries
+/+a
+/aa
+/plus-a
+
+# Rust build artifacts
+/rust/target/
+
+# makepkg temporary directories
+/src/
+/pkg/

@@ -17,12 +17,12 @@ members = []
 
 [package]
 name = "ascension-assembler"
-version = "1.1.0"
+version = "2.0.0"
 edition = "2024"
 # The code uses `u64::is_multiple_of` (stable in 1.87) and edition 2024
 # (minimum 1.85), so 1.87 is the true floor.
 rust-version = "1.87"
-description = "ASCENSION +A Core V1.1.0 language toolchain"
+description = "ASCENSION +A Core V2.0.0 language toolchain"
 default-run = "plus-a"
 
 [lib]

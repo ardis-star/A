@@ -1,7 +1,7 @@
 # +A Bytecode Format (`.avm`)
 
-**Format:** A+BC version 1.0 (major 1, minor 0)
-**Edition:** ASCENSION +A Core V1.1.0
+**Format:** A+BC version 1.0 (major 1, minor 0 or 1)
+**Edition:** ASCENSION +A Core V2.0.0
 
 An `.avm` file is a self-contained, position-independent container for one
 program unit. It is verified before it is loaded or executed.
@@ -26,7 +26,7 @@ program unit. It is verified before it is loaded or executed.
 |---|---|---|---|
 | 0 | 4 | magic | ASCII `A+BC` (`41 2B 42 43`). |
 | 4 | 2 | major version | `1`. Other values are rejected. |
-| 6 | 2 | minor version | `0`. |
+| 6 | 2 | minor version | `0` (no control flow) or `1` (with `BLOCKS`). Values above `1` are rejected. |
 | 8 | 2 | header size | `40`. |
 | 10 | 2 | flags | Reserved; must be `0`. |
 | 12 | 8 | total size | Total image length in bytes. Must match the file length exactly. |
@@ -43,33 +43,50 @@ Each entry is 32 bytes:
 |---|---|---|
 | 0 | 4 | section type |
 | 4 | 4 | flags |
-| 8 | 8 | payload offset (absolute, 8-byte aligned) |
+| 8 | 8 | payload offset (absolute, aligned to the entry’s alignment) |
 | 16 | 8 | payload length |
-| 24 | 4 | payload alignment (`8`) |
+| 24 | 4 | payload alignment (power of two; `8` in assembler output) |
 | 28 | 4 | CRC-32C of the payload |
 
 Defined section types:
 
 | Type | Name | Required | Contents |
 |---|---|---|---|
-| 1 | `META` | yes | Metadata records (§4). |
-| 3 | `DATA` | no | Read-only constant data. |
-| 4 | `CODE` | yes | Function descriptors followed by instruction streams. |
-| 5 | `SYMS` | no | Exported symbol names (§6). |
-| 8 | `CAPS` | no | Capability requirements (§7). |
-| 9 | `BLOCKS` | conditional | Block map, present only when the program has control flow. |
+| 1 | `META` | no | Producer string (§4). |
+| 3 | `DATA` | yes | Read-only constant data records (§5). |
+| 4 | `CODE` | yes | Function descriptors followed by instruction streams (§6). |
+| 5 | `SYMS` | no | Exported symbol names (§7). |
+| 7 | `EXCP` | no | Exception-handler ranges (never emitted by this assembler). |
+| 8 | `CAPS` | yes | Capability requirements (§8). |
+| 9 | `BLOCKS` | conditional | Block map, present only when the program has control flow (§9). |
 
-Section flags: bit 0 (`0x1`) marks a **required** section. An unknown or
-duplicated section type, a missing required section, a misaligned payload
-offset, or a bad CRC is a verification error.
+Section flags: bit 0 (`0x1`) marks a **required** section. Only `BLOCKS` may
+carry the required flag; any other section with the flag set is rejected, and
+`BLOCKS` without the flag is rejected. A duplicated section type,
+a missing required section, a misaligned payload offset, or a bad CRC is a
+verification error. The assembler always emits `META`, `DATA`, `CODE`,
+`SYMS`, and `CAPS`, plus `BLOCKS` when the program has control flow.
 
 ## 4. `META`
 
-A 32-bit record count followed by that many records of
-`u16 length`, `length` bytes of UTF-8. Keys used by this toolchain include the
-producer name and version.
+An opaque producer string, NUL-terminated: `+A assembler 2.0.0\0`. The
+verifier checks only its CRC; the content is informational. (Earlier
+releases wrote `+A assembler 0.1\0`; the string changed in V2.0.0 without
+affecting verification — the content is not interpreted by the verifier.)
 
-## 5. `CODE`
+## 5. `DATA`
+
+```
+u32 record_count
+record_count × { u32 region_id; u64 data_offset; u64 length; u32 flags }  (24 bytes each)
+```
+
+The verifier checks that the payload length matches the record count and that
+no record range overflows. The assembler always emits a zero-length `DATA`
+section (also accepted as empty), and no instruction reads it; mapping policy belongs to
+the embedder (see [MEMORY-MODEL.md](MEMORY-MODEL.md)).
+
+## 6. `CODE`
 
 ```
 u32 function_count
@@ -82,26 +99,25 @@ Function descriptor (32 bytes; all offsets relative to the start of `CODE`):
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 4 | function ID |
-| 4 | 4 | flags (bit 0 = exported) |
+| 4 | 4 | flags (must be `0`) |
 | 8 | 8 | code offset |
 | 16 | 8 | code length in bytes |
 | 24 | 4 | maximum stack frame, in bytes |
-| 28 | 2 | argument count |
-| 30 | 2 | reserved |
+| 28 | 2 | argument count (at most 8) |
+| 30 | 2 | result count (at most 2) |
 
-In images produced by V1 the descriptor table is a single 32-byte entry and the
-instruction stream starts 36 bytes into `CODE` (4-byte count + 32-byte
-descriptor), i.e. `CODE + 36` for function 0. Exactly **one** function carries
-the exported flag, and its stream must begin with the program's first
-instruction; otherwise the image is a library image and the header's entry field
-is `0xFFFFFFFF`.
+In images produced by this toolchain the descriptor table is a single 32-byte
+entry and the instruction stream starts 36 bytes into `CODE` (4-byte count +
+32-byte descriptor), i.e. `CODE + 36` for function 0. The header's entry
+field is `0` when the program exports a label and `0xFFFFFFFF` for a library
+image.
 
-### 5.1 Instruction stream
+### 6.1 Instruction stream
 
 ```
 u16 opcode
 u8  operand_count
-u8  width           0 = none, else view code + 1 (1=.b, 2=.w, 3=.d, 4=.q)
+u8  width           0 = none, else view code (1=.b, 2=.w, 3=.d, 4=.q)
 uleb128 payload_length
 payload_length bytes of operands, in operand order
 ```
@@ -121,7 +137,7 @@ Operand encoding (tag byte, then the operand):
 Any other tag, a payload whose length disagrees with its operands, or an
 operand count that contradicts the instruction shape is a verification error.
 
-## 6. `SYMS`
+## 7. `SYMS`
 
 ```
 u32 count
@@ -132,38 +148,39 @@ Names are unique and ASCII. `address` operands carry a **symbol index** into
 this table, which is why the assembler must emit a `SYMS` section for a program
 that uses `address`.
 
-## 7. `CAPS`
+## 8. `CAPS`
 
 ```
 u32 record_count
-record_count × { u16 length; required capability bits }
+record_count × { u32 capability_bits }
 ```
 
-Each record states the capability bits a function requires to run. The
+An empty payload is accepted and emitted by the assembler. Nonempty records
+are combined into a global capability mask. The
 verifier rejects an image whose `CAPS` payload contains bytes beyond the last
 record: trailing data in a capability section is an error, not padding.
 
-## 8. `BLOCKS`
+## 9. `BLOCKS`
 
 ```
 u32 count
 count × { u32 function_id; u32 block_id; u64 code_offset }
 ```
 
-Blocks are resolved to absolute offsets inside `CODE`. The V1 verifier refuses
+Block offsets are relative to the start of their function’s instruction stream. The verifier refuses
 to execute an image whose block targets cannot be represented
 (`unresolved_control_targets`), rather than guessing.
 
-## 9. Verification pipeline
+## 10. Verification pipeline
 
 `verify_image` performs, in order: header and magic checks → directory and CRC
-checks → `META`/`CODE`/`SYMS`/`CAPS`/`BLOCKS` structural checks → per-function
+checks → `CODE`/`SYMS`/`BLOCKS`/`EXCP`/`DATA` structural checks → per-function
 decode and operand checks → capability validation. `decode_image` performs the
 structural half only, which is what `+a inspect` uses. See
 [VERIFICATION.md](VERIFICATION.md) for the rule list.
 
-## 10. Compatibility
+## 11. Compatibility
 
 A reader must reject any image whose **major** version is not `1`. The minor
-version may be raised for additive changes; V1 readers accept only minor `0`.
-There are currently no other producers of `A+BC` images.
+version may be raised for additive changes; V2.0.0 readers accept minor `0`
+and `1`. There are currently no other producers of `A+BC` images.

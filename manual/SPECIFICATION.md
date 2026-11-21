@@ -1,7 +1,7 @@
 # +A Language Specification
 
-**Edition:** ASCENSION +A Core V1.1.0
-**Status:** normative for the V1 toolchain in this repository.
+**Edition:** ASCENSION +A Core V2.0.0
+**Status:** normative for the V2 toolchain in this repository.
 
 This document describes the +A assembly language as the reference implementation
 actually accepts it. Where prose and code disagree, the code is authoritative;
@@ -18,7 +18,8 @@ assembled into a portable bytecode image (`.avm`) that can be:
 
 * interpreted by the AVM,
 * compiled to x86-64 at runtime (JIT), or
-* compiled ahead of time to a standalone Linux ELF executable.
+* compiled ahead of time to a standalone Linux ELF executable — hosted
+  (libc-linked) or freestanding (experimental ELF for an x86-64 long-mode loader).
 
 The language, the bytecode format, and the verifier are specified here. The
 execution tiers are specified in [manual/AVM.md](AVM.md) and
@@ -29,8 +30,9 @@ execution tiers are specified in [manual/AVM.md](AVM.md) and
 * Source files use the **`.pa`** extension. The legacy `.a` extension is still
   accepted for source files; `.ma` is explicitly rejected because that suffix
   belongs to the unrelated `-A` project.
-* Files are UTF-8. Line endings may be LF or CRLF; CRLF is normalised to LF
-  before lexing, so line and column numbers match the file as written.
+* Files are UTF-8. Line endings may be LF, CRLF, or CR; all are treated as
+  line endings by the lexer, so line and column numbers match the file as
+  written whether the source is read through the CLI or the library API.
 * A statement occupies one line. Blank lines are ignored.
 * `;;` starts a comment that runs to the end of the line. There is no
   block-comment form.
@@ -266,13 +268,28 @@ Assembling the same source twice produces byte-identical images. The assembler
 uses ordered maps throughout, so label ordering does not leak into output. This
 is covered by tests, including exact golden images.
 
-## 15. Compatibility notes for V1.1.0
+## 15. Compatibility notes for V2.0.0
 
-The following behaviours changed in V1.1.0 and are documented in
-[CHANGELOG.md](../CHANGELOG.md):
+The bytecode format version remains A+BC major 1 (minor 0 or 1). The verifier
+is stricter for invalid images; compatibility has not been exhaustively validated
+against all prior releases. The following behaviours changed in V2.0.0 and
+are documented in [CHANGELOG.md](../CHANGELOG.md):
 
-* `div.s` of the most negative value by `-1` now reports `INTEGER_OVERFLOW`
-  rather than `DIVIDE_BY_ZERO`.
-* `address` resolves through the symbol table and yields a **VM address**;
-  native backends reject it.
-* `raise` no longer transfers to a handler registered in another function.
+* The native emitter now lowers all 16 memory instructions (51 of 97 in total).
+  The safe JIT and CLI reject raw memory operations; trusted embedders may use
+  the unsafe JIT API. AOT memory is direct host memory, not sandboxed — see
+  [JIT-AOT.md](JIT-AOT.md) §1.1.
+* `address` is now correctly reported as interpreter-only: the native subset
+  table previously claimed it while the emitter rejected it. Native runs of
+  `address` programs now fail with the named refusal instead of a linker
+  error.
+* The verifier rejects out-of-range `fence`/`flag.direction` modes and
+  `address` operands naming a symbol outside `SYMS`, instead of accepting
+  them and faulting (or disagreeing between tiers) at run time.
+* The library `assemble` accepts CRLF and CR line endings, matching the CLI.
+* Direct `+a <source.pa>` execution rejects `--jit --native` together and
+  `-o` combined with an execution tier, instead of silently ignoring one.
+* The `META` producer string is now `+A assembler 2.0.0` (was `0.1`); the
+  content is informational only and does not affect verification.
+* Freestanding output (`--freestanding`, `--object`, `--load-address`) is new;
+  see [JIT-AOT.md](JIT-AOT.md) §8.

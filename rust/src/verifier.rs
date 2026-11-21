@@ -456,6 +456,22 @@ fn validate_instruction(
             ));
         }
     }
+    // Mode operands have a closed range: `flag.direction` takes 0 (forward)
+    // or 1 (backward), `fence` takes 0 (acquire), 1 (release), or 2 (full).
+    // The assembler only ever emits those values, but a hand-crafted image
+    // could carry anything; reject it here rather than letting the AVM and
+    // the native backends disagree about what an out-of-range mode means.
+    if matches!(opcode, 0x000A | 0x000C) {
+        let value = match operands.first() {
+            Some(VerifiedOperand::Unsigned(value)) => *value as i64,
+            Some(VerifiedOperand::Signed(value)) => *value,
+            _ => return Err(fail("mode operand must be an immediate")),
+        };
+        let maximum = if opcode == 0x000A { 1 } else { 2 };
+        if !(0..=maximum).contains(&value) {
+            return Err(fail("mode operand is outside its defined range"));
+        }
+    }
     if matches!(
         shape,
         Shape::DestinationSource
@@ -652,10 +668,18 @@ pub fn decode_image(image: &[u8]) -> Result<DecodedImage, VerifyError> {
     } else {
         Vec::new()
     };
+    // Index records once instead of scanning every block for every function.
+    let mut blocks_by_function = vec![Vec::new(); function_count];
+    for (function_id, block_id, block_offset) in block_records {
+        let records = blocks_by_function
+            .get_mut(function_id as usize)
+            .ok_or_else(|| fail("block map function ID is outside function table"))?;
+        records.push((block_id, block_offset));
+    }
     let mut functions = Vec::with_capacity(function_count);
-    let mut function_ranges = Vec::with_capacity(function_count);
+    let mut function_ranges = BTreeMap::<usize, usize>::new();
     let mut unresolved_targets = Vec::new();
-    for index in 0..function_count {
+    for (index, function_blocks) in blocks_by_function.iter().enumerate() {
         let descriptor = 4 + index * 32;
         let id = read_u32(code, descriptor)?;
         let flags = read_u32(code, descriptor + 4)?;
@@ -680,15 +704,20 @@ pub fn decode_image(image: &[u8]) -> Result<DecodedImage, VerifyError> {
         if range.start < descriptors_end {
             return Err(fail("function code overlaps descriptor table"));
         }
-        if function_ranges
-            .iter()
-            .any(|existing: &std::ops::Range<usize>| {
-                range.start < existing.end && existing.start < range.end
-            })
-        {
-            return Err(fail("function code ranges overlap"));
+        if !range.is_empty() {
+            let overlaps_previous = function_ranges
+                .range(..=range.start)
+                .next_back()
+                .is_some_and(|(_, end)| *end > range.start);
+            let overlaps_next = function_ranges
+                .range(range.start..)
+                .next()
+                .is_some_and(|(start, _)| *start < range.end);
+            if overlaps_previous || overlaps_next {
+                return Err(fail("function code ranges overlap"));
+            }
+            function_ranges.insert(range.start, range.end);
         }
-        function_ranges.push(range.clone());
         let (instructions, targets) = decode_instruction_stream(
             &code[range.clone()],
             sections[&SECTION_CODE].offset + range.start,
@@ -698,19 +727,17 @@ pub fn decode_image(image: &[u8]) -> Result<DecodedImage, VerifyError> {
         }
         let mut blocks = BTreeMap::new();
         let mut mapped_offsets = BTreeSet::new();
-        for (function_id, block_id, block_offset) in block_records.iter().copied() {
-            if function_id != id {
-                continue;
-            }
+        for (block_id, block_offset) in function_blocks.iter().copied() {
             let block_offset = usize::try_from(block_offset)
                 .map_err(|_| fail("block offset is not representable"))?;
+            let absolute_offset = sections[&SECTION_CODE]
+                .offset
+                .checked_add(range.start)
+                .and_then(|offset| offset.checked_add(block_offset))
+                .ok_or_else(|| fail("block offset overflow"))?;
             let instruction_index = instructions
-                .iter()
-                .position(|instruction| {
-                    instruction.code_offset
-                        == sections[&SECTION_CODE].offset + range.start + block_offset
-                })
-                .ok_or_else(|| fail("block target does not point to an instruction boundary"))?;
+                .binary_search_by_key(&absolute_offset, |instruction| instruction.code_offset)
+                .map_err(|_| fail("block target does not point to an instruction boundary"))?;
             if blocks
                 .insert(u64::from(block_id), instruction_index)
                 .is_some()
@@ -745,11 +772,19 @@ pub fn decode_image(image: &[u8]) -> Result<DecodedImage, VerifyError> {
             blocks,
         });
     }
-    if block_records
-        .iter()
-        .any(|(function_id, _, _)| *function_id as usize >= function_count)
-    {
-        return Err(fail("block map function ID is outside function table"));
+    // Every `address` operand must name a symbol that exists. Without this
+    // check an out-of-range index would only fault at run time, after the
+    // image had already been accepted as verified.
+    for function in &functions {
+        for instruction in &function.instructions {
+            for operand in &instruction.operands {
+                if let VerifiedOperand::Symbol(index) = operand
+                    && *index as usize >= symbols.len()
+                {
+                    return Err(fail("symbol index is outside SYMS section"));
+                }
+            }
+        }
     }
     if let Some(excp_section) = sections.get(&SECTION_EXCP) {
         validate_excp_section(excp_section.data, &functions)?;
@@ -821,6 +856,11 @@ fn validate_symbols(bytes: &[u8], function_count: usize) -> Result<Vec<Symbol>, 
         return Err(fail("truncated SYMS section"));
     }
     let count = read_u32(bytes, 0)? as usize;
+    // Every record needs at least a u16 name length and a u32 function ID.
+    // Reject forged counts before using them to reserve memory.
+    if count > (bytes.len() - 4) / 6 {
+        return Err(fail("truncated SYMS records"));
+    }
     let mut position = 4usize;
     let mut names = BTreeSet::new();
     let mut symbols = Vec::with_capacity(count);
@@ -908,16 +948,11 @@ fn validate_excp_section(
         }
         ranges.push((function_id, start_block, end_block, handler_block));
     }
-    for i in 0..ranges.len() {
-        for j in i + 1..ranges.len() {
-            if ranges[i].0 != ranges[j].0 {
-                continue;
-            }
-            let a = &ranges[i];
-            let b = &ranges[j];
-            if a.1 < b.2 && b.1 < a.2 {
-                return Err(fail("exception protected ranges overlap"));
-            }
+    ranges.sort_unstable_by_key(|range| (range.0, range.1, range.2));
+    for pair in ranges.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        if a.0 == b.0 && b.1 < a.2 {
+            return Err(fail("exception protected ranges overlap"));
         }
     }
     Ok(())

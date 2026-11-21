@@ -335,3 +335,195 @@ fn test_cli_aa_binary_matches_plus_a() {
 
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn test_cli_direct_mode_rejects_contradictory_flags() {
+    let plus_a = env!("CARGO_BIN_EXE_plus-a");
+    let dir = temp_dir("test-direct-flags");
+    let source_path = dir.join("hello.pa");
+    fs::write(
+        &source_path,
+        "unit hello\nexport main\nmain::\n    move R0.q <- 0\n    stop\n",
+    )
+    .unwrap();
+
+    // --jit and --native together are contradictory in direct mode too.
+    let both = Command::new(plus_a)
+        .arg(&source_path)
+        .arg("--jit")
+        .arg("--native")
+        .output()
+        .unwrap();
+    assert_eq!(both.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&both.stderr).contains("cannot be combined"));
+
+    // -o selects bytecode-only output and cannot be combined with an
+    // execution tier.
+    let out = dir.join("out.avm");
+    let combined = Command::new(plus_a)
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&out)
+        .arg("--native")
+        .output()
+        .unwrap();
+    assert_eq!(combined.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&combined.stderr).contains("cannot be combined"));
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_cli_freestanding_and_object_builds() {
+    let plus_a = env!("CARGO_BIN_EXE_plus-a");
+    let dir = temp_dir("test-freestanding-cli");
+    let source_path = dir.join("hello.pa");
+    fs::write(
+        &source_path,
+        "unit hello\nexport main\nmain::\n    move R0.q <- 0\n    stop\n",
+    )
+    .unwrap();
+
+    // Freestanding options require --native.
+    let bare = Command::new(plus_a)
+        .arg("build")
+        .arg(&source_path)
+        .arg("--freestanding")
+        .output()
+        .unwrap();
+    assert_eq!(bare.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bare.stderr).contains("require --native"));
+
+    // A freestanding build produces a static image at the load address.
+    let free = dir.join("hello-free");
+    let built = Command::new(plus_a)
+        .arg("build")
+        .arg(&source_path)
+        .arg("--native")
+        .arg("--freestanding")
+        .arg("--load-address")
+        .arg("0x100000")
+        .arg("-o")
+        .arg(&free)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let bytes = fs::read(&free).unwrap();
+    assert_eq!(&bytes[0..4], b"\x7fELF");
+    let entry = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+    assert_eq!(entry, 0x100000);
+
+    // Object output is relocatable.
+    let obj = dir.join("hello.o");
+    let built = Command::new(plus_a)
+        .arg("build")
+        .arg(&source_path)
+        .arg("--native")
+        .arg("--object")
+        .arg("-o")
+        .arg(&obj)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let bytes = fs::read(&obj).unwrap();
+    assert_eq!(&bytes[0..4], b"\x7fELF");
+    let elf_type = u16::from_le_bytes(bytes[16..18].try_into().unwrap());
+    assert_eq!(elf_type, 1);
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_object_load_address_is_rejected() {
+    let dir = temp_dir("test-object-address");
+    let source = dir.join("program.pa");
+    fs::write(&source, "export main\nmain::\n stop\n").unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_plus-a"))
+        .arg("build")
+        .arg(&source)
+        .arg("--native")
+        .arg("--object")
+        .arg("--freestanding")
+        .arg("--load-address")
+        .arg("0x100000")
+        .arg("-o")
+        .arg(dir.join("program.o"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("cannot be used with --object"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_cli_jit_rejects_direct_host_memory() {
+    let dir = temp_dir("test-jit-memory");
+    let source = dir.join("program.pa");
+    fs::write(
+        &source,
+        "export main\nmain::\n load.u8 R0.b <- [R1.q]\n stop\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_plus-a"))
+        .arg("run")
+        .arg(&source)
+        .arg("--jit")
+        .arg("--build-dir")
+        .arg(dir.join("out"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsafe run_jit64_unchecked"));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn native_run_distinguishes_status_70_from_runtime_faults_and_signals() {
+    let dir = temp_dir("test-native-status");
+    let source = dir.join("status.pa");
+    let binary = env!("CARGO_BIN_EXE_plus-a");
+    for status in [70, 326] {
+        fs::write(
+            &source,
+            format!("export main\nmain::\n move R0.q <- {status}\n stop\n"),
+        )
+        .unwrap();
+        let output = Command::new(binary)
+            .arg("run")
+            .arg(&source)
+            .arg("--native")
+            .arg("--build-dir")
+            .arg(dir.join("out"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("stopped: 70"));
+    }
+    for body in ["div.u R0.q, R1.q <- 1, 0", "load.u8 R0.b <- [R1.q]"] {
+        fs::write(&source, format!("export main\nmain::\n {body}\n stop\n")).unwrap();
+        let output = Command::new(binary)
+            .arg("run")
+            .arg(&source)
+            .arg("--native")
+            .arg("--build-dir")
+            .arg(dir.join("out"))
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{body}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("runtime fault"));
+    }
+    fs::remove_dir_all(dir).unwrap();
+}

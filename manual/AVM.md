@@ -1,6 +1,6 @@
 # The ASCENSION Virtual Machine (AVM)
 
-**Edition:** ASCENSION +A Core V1.1.0
+**Edition:** ASCENSION +A Core V2.0.0
 
 The AVM is the reference execution tier: an interpreter for `A+BC` bytecode.
 It is the definition of correct behaviour — the JIT and AOT backends are tested

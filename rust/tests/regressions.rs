@@ -9,7 +9,7 @@ use ascension_asm::assemble;
 use ascension_asm::avm::{Avm, AvmError, MemoryRegion, RunResult};
 use ascension_asm::bytecode::crc32c;
 use ascension_asm::jit::run_jit;
-use ascension_asm::jit::run_jit64;
+use ascension_asm::jit::{run_jit64, run_jit64_unchecked};
 use ascension_asm::native::{NATIVE_FAULT_EXIT, compile_executable, emit_assembly};
 use ascension_asm::verifier::verify_image;
 
@@ -937,15 +937,15 @@ fn instruction_reference_covers_every_defined_mnemonic() {
 fn native_refusal_names_the_unsupported_instruction() {
     use ascension_asm::native::unsupported_instructions;
 
-    // `load.u64` is interpreter-only; the program itself is well formed.
-    let body = "move R1.q <- 0x1000\n    load.u64 R0.q <- [R1.q]\n";
+    // `select` is interpreter-only; the program itself is well formed.
+    let body = "select R0.q <- zero, 1, 2\n";
     let image = image_of(body);
     let missing = unsupported_instructions(&image).unwrap();
-    assert_eq!(missing, vec!["load.u64".to_string()]);
+    assert_eq!(missing, vec!["select".to_string()]);
 
     let error = emit_assembly(&image).unwrap_err().to_string();
     assert!(
-        error.contains("load.u64"),
+        error.contains("select"),
         "the refusal must name it: {error}"
     );
     assert!(
@@ -960,9 +960,10 @@ fn native_refusal_names_the_unsupported_instruction() {
             .is_empty()
     );
 
-    // The interpreter is unaffected, and faults for the real reason.
+    // The interpreter is unaffected and runs the same image. FLAGS start at
+    // zero, so `zero` is false and the false branch (2) is selected.
     let mut machine = Avm::load(&image).unwrap();
-    assert!(matches!(machine.run(), Err(AvmError::MemoryAccess { .. })));
+    assert_eq!(machine.run(), Ok(RunResult::Stopped(2)));
 }
 
 /// The CLI must refuse a native run of an interpreter-only image with exit
@@ -982,7 +983,7 @@ fn cli_refuses_native_runs_that_need_the_interpreter() {
     let source = directory.join("program.pa");
     std::fs::write(
         &source,
-        "export main\nmain::\n    move R1.q <- 0x1000\n    load.u64 R0.q <- [R1.q]\n    stop\n",
+        "export main\nmain::\n    select R0.q <- zero, 1, 2\n    stop\n",
     )
     .unwrap();
     for mode in ["--native", "--jit"] {
@@ -996,7 +997,7 @@ fn cli_refuses_native_runs_that_need_the_interpreter() {
             .unwrap();
         assert_eq!(output.status.code(), Some(2), "mode {mode}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("load.u64"), "mode {mode}: {stderr}");
+        assert!(stderr.contains("select"), "mode {mode}: {stderr}");
     }
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -1095,4 +1096,220 @@ fn memory_semantics_match_the_documented_rules() {
             .is_err(),
         "overlapping regions must be refused"
     );
+}
+
+/// Native memory instructions must agree with the interpreter: the same
+/// program stores and loads the same bytes in both tiers. The JIT runs
+/// in-process, so the test can hand the program a real buffer address.
+#[test]
+fn native_memory_matches_the_interpreter() {
+    let mut buffer = [0u8; 64];
+    let address = buffer.as_mut_ptr() as u64;
+    let program = format!(
+        "export main\nmain::\n    move R1.q <- {address}\n    move R2.q <- 0x1122334455667788\n    store.u64 [R1.q] <- R2.q\n    load.u64 R0.q <- [R1.q]\n    stop\n"
+    );
+    let image = assemble(&program).unwrap();
+
+    let mut machine = Avm::load(&image).unwrap();
+    machine
+        .map_region(MemoryRegion {
+            base: address,
+            bytes: vec![0; 64],
+            readable: true,
+            writable: true,
+            shared: false,
+            atomic: false,
+        })
+        .unwrap();
+    assert_eq!(machine.run(), Ok(RunResult::Stopped(0x1122334455667788)));
+
+    buffer = [0u8; 64];
+    // SAFETY: the image accesses only the live writable `buffer` range.
+    assert_eq!(
+        unsafe { run_jit64_unchecked(&image) }.unwrap(),
+        0x1122334455667788
+    );
+    assert_eq!(
+        &buffer[..8],
+        &[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]
+    );
+}
+
+/// Narrow and ordered native memory accesses agree with the interpreter too.
+#[test]
+fn native_narrow_and_ordered_memory_matches() {
+    #[repr(align(8))]
+    struct Aligned([u8; 64]);
+    let mut storage = Aligned([0u8; 64]);
+    let buffer = &mut storage.0;
+    let address = buffer.as_mut_ptr() as u64;
+    let program = format!(
+        "export main\nmain::\n    move R1.q <- {address}\n    move R2.b <- 0xAB\n    store.u8 [R1.q + 3] <- R2.b\n    move R2.q <- 0x1234\n    store.release.u16 [R1.q + 4] <- R2.w\n    move R0.q <- 0\n    load.u8 R0.b <- [R1.q + 3]\n    load.acquire.u16 R3.w <- [R1.q + 4]\n    sum! R0.q <- R0.q, R3.q\n    stop\n"
+    );
+    let image = assemble(&program).unwrap();
+
+    let mut machine = Avm::load(&image).unwrap();
+    machine
+        .map_region(MemoryRegion {
+            base: address,
+            bytes: vec![0; 64],
+            readable: true,
+            writable: true,
+            shared: true,
+            atomic: true,
+        })
+        .unwrap();
+    assert_eq!(machine.run(), Ok(RunResult::Stopped(0xAB + 0x1234)));
+
+    *buffer = [0u8; 64];
+    // SAFETY: all accesses lie within the live, writable, aligned buffer.
+    assert_eq!(
+        unsafe { run_jit64_unchecked(&image) }.unwrap(),
+        0xAB + 0x1234
+    );
+    assert_eq!(buffer[3], 0xAB);
+    assert_eq!(&buffer[4..6], &[0x34, 0x12]);
+}
+
+/// `mul!` clears C and O in every tier: a product that overflows the width
+/// must not set carry. This pins the flag contract the docs state.
+#[test]
+fn mul_flag_semantics_agree_across_tiers() {
+    // 0xFF * 0xFF = 0xFE01, truncated to 0x01; C and O must read clear.
+    let body = "move R1.b <- 0xFF\n    mul! R2.b <- R1.b, R1.b\n    if.carry -> carried\n    move R0.q <- 7\n    stop\ncarried::\n    move R0.q <- 9\n    stop\n";
+    let image = image_of(body);
+    let mut machine = Avm::load(&image).unwrap();
+    assert_eq!(machine.run(), Ok(RunResult::Stopped(7)));
+    assert_eq!(run_jit64(&image).unwrap(), 7);
+}
+
+/// Freestanding output is a static ELF with a `_start` entry and no libc:
+/// no interpreter segment, no `main`, and the load address is honoured.
+#[test]
+fn freestanding_output_is_a_static_start_image() {
+    use ascension_asm::native::{NativeTarget, compile_freestanding, emit_assembly_for};
+
+    let image = image_of("move R0.q <- 1\n");
+    let assembly = emit_assembly_for(&image, NativeTarget::Freestanding).unwrap();
+    assert!(
+        assembly.contains("_start"),
+        "freestanding entry: {assembly}"
+    );
+    assert!(!assembly.contains("main"), "no hosted entry: {assembly}");
+    assert!(assembly.contains("hlt"), "stop halts: {assembly}");
+
+    let directory = std::env::temp_dir().join(format!(
+        "ascension-free-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let output = directory.join("free.bin");
+    compile_freestanding(&image, &output, Some(0x100000)).unwrap();
+    let bytes = std::fs::read(&output).unwrap();
+    assert_eq!(&bytes[0..4], b"\x7fELF");
+    let entry = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+    assert_eq!(entry, 0x100000);
+    // No PT_INTERP (type 3) program header: the image needs no loader.
+    let phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    for index in 0..phnum {
+        let ptype = u32::from_le_bytes(
+            bytes[phoff + index * phentsize..phoff + index * phentsize + 4]
+                .try_into()
+                .unwrap(),
+        );
+        assert_ne!(ptype, 3, "freestanding image must not have PT_INTERP");
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Object output is a relocatable ELF (ET_REL) exporting `_start`, ready to
+/// link with a custom linker script.
+#[test]
+fn object_output_is_relocatable() {
+    use ascension_asm::native::compile_object;
+
+    let image = image_of("move R0.q <- 1\n");
+    let directory = std::env::temp_dir().join(format!(
+        "ascension-obj-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let output = directory.join("prog.o");
+    compile_object(&image, &output).unwrap();
+    let bytes = std::fs::read(&output).unwrap();
+    assert_eq!(&bytes[0..4], b"\x7fELF");
+    let elf_type = u16::from_le_bytes(bytes[16..18].try_into().unwrap());
+    assert_eq!(elf_type, 1, "object output must be ET_REL");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn compare_swap_all_widths_preserves_adjacent_bytes_and_matches_jit() {
+    #[repr(align(8))]
+    struct Aligned([u8; 16]);
+    for (view, width) in [("b", 1usize), ("w", 2), ("d", 4), ("q", 8)] {
+        let matching = u64::from_le_bytes([0x11; 8]) >> ((8 - width) * 8);
+        for expected in [matching, 0x22] {
+            let mut storage = Aligned([0x11u8; 16]);
+            let backing = &mut storage.0;
+            let address = backing.as_mut_ptr() as u64;
+            let body = format!(
+                "move R1.q <- {address}\n    move R2.{view} <- {expected}\n    move R3.{view} <- 0x33\n    compare.swap R0.{view} <- [R1.q], R2.{view}, R3.{view}\n"
+            );
+            let image = image_of(&body);
+            let mut machine = Avm::load(&image).unwrap();
+            machine
+                .map_region(MemoryRegion {
+                    base: address,
+                    bytes: backing.to_vec(),
+                    readable: true,
+                    writable: true,
+                    shared: true,
+                    atomic: true,
+                })
+                .unwrap();
+            let result = machine.run().unwrap();
+            let RunResult::Stopped(status) = result else {
+                panic!("expected stop")
+            };
+            let expected_bytes = machine.memory_region(address).unwrap().bytes.clone();
+            // SAFETY: the aligned backing buffer remains live and exclusively borrowed.
+            assert_eq!(unsafe { run_jit64_unchecked(&image) }.unwrap(), status);
+            assert_eq!(backing.as_slice(), expected_bytes.as_slice(), "view {view}");
+            assert_eq!(&backing[width..], &[0x11u8; 16][width..]);
+        }
+    }
+}
+
+#[test]
+fn native_direction_flag_does_not_change_host_direction_flag() {
+    let assembly = emit_assembly(&image_of(
+        "flag.direction <- backward\n    flag.direction <- forward\n",
+    ))
+    .unwrap();
+    assert!(assembly.contains("orq $32, -264(%rbp)"));
+    assert!(assembly.contains("andq $-33, -264(%rbp)"));
+    assert!(!assembly.contains("\tstd\n"));
+}
+
+#[test]
+fn safe_jit_refuses_raw_memory_access() {
+    for body in [
+        "load.u64 R0.q <- [R1.q]\n",
+        "store.u8 [R1.q] <- R0.b\n",
+        "compare.swap R0.q <- [R1.q], 0, 1\n",
+    ] {
+        let error = run_jit64(&image_of(body)).unwrap_err();
+        assert!(error.to_string().contains("unsafe run_jit64_unchecked"));
+    }
 }

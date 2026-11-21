@@ -1,4 +1,4 @@
-//! +A v1 source assembler and canonical `.avm` encoder.
+//! +A Core source assembler and canonical A+BC bytecode encoder.
 
 pub mod avm;
 pub mod bytecode;

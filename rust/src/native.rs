@@ -33,17 +33,40 @@ pub const FAULT_DIVIDE_BY_ZERO: i32 = 1;
 /// This is the single source of truth for the native subset: `emit_instruction`
 /// refuses anything outside it, [`native_supports`] answers queries about it,
 /// and the public documentation table is checked against it by a test.
+///
+/// Note that `address` (0x000B) is deliberately absent: it names a location in
+/// the bytecode image, which has no meaning in native code, so the backends
+/// reject it rather than emit a value that disagrees with the interpreter.
 pub const NATIVE_OPCODE_RANGES: &[(u16, u16)] = &[
     (0x0001, 0x0001), // nop
     (0x0003, 0x0006), // return, stop, div.u, div.s
-    (0x000A, 0x000D), // flag.direction, fence, compare.swap
+    (0x000A, 0x000A), // flag.direction
+    (0x000C, 0x000D), // fence, compare.swap
     (0x0010, 0x0010), // move
     (0x0020, 0x0024), // sum, sum!, diff, diff!, compare!
     (0x002A, 0x002A), // mul!
     (0x0030, 0x0035), // and/or/xor/not, with and without flags
+    (0x0040, 0x0047), // load.u8..u64, store.u8..u64
     (0x0050, 0x0056), // jump, if.*, call, tailcall
     (0x0060, 0x0066), // exchange, if.sign/notsign/overflow/nooverflow/even/odd
+    (0x0080, 0x0087), // load.acquire.*, store.release.*
 ];
+
+/// Which native target to emit for.
+///
+/// * [`NativeTarget::Hosted`] is the normal SysV `main` entry that links
+///   against libc and returns the `stop` status to its caller. This is what
+///   the JIT and the hosted AOT path use.
+/// * [`NativeTarget::Freestanding`] emits a `_start` entry with no libc
+///   dependency, suitable for bootloaders and kernels. `stop` halts the CPU
+///   with the status in `%rax`; a runtime fault traps with the fault code in
+///   `%rax`. The entry expects a valid stack in `%rsp` (as a bootloader or
+///   firmware provides) and uses 304 bytes of frame plus call depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTarget {
+    Hosted,
+    Freestanding,
+}
 
 /// Whether the native backends can lower `opcode`.
 pub fn native_supports(opcode: u16) -> bool {
@@ -497,11 +520,11 @@ fn emit_flag_direction(instruction: &VerifiedInstruction) -> Result<String, Nati
         Some(VerifiedOperand::Signed(v)) => *v != 0,
         _ => return Err(error("flag.direction requires a mode")),
     };
-    if value {
-        Ok("\tstd\n".to_owned())
-    } else {
-        Ok("\tcld\n".to_owned())
-    }
+    let operation = if value { "orq $32" } else { "andq $-33" };
+    Ok(format!(
+        "\t{operation}, {}\n",
+        offset_text(FLAGS_OFFSET, "%rbp")
+    ))
 }
 
 fn emit_fence(instruction: &VerifiedInstruction) -> Result<String, NativeError> {
@@ -537,10 +560,8 @@ fn emit_compare_swap(instruction: &VerifiedInstruction) -> Result<String, Native
         .ok_or_else(|| error("compare.swap needs destination register"))?;
     let mask = view_mask(width);
     let mut assembly = load_scalar(instruction, 2, width, "%rax")?; // expected -> %rax
-    assembly.push_str(&load_scalar(instruction, 3, width, "%rbx")?); // desired -> %rbx
-    // Address: the base register's full 64-bit value plus the encoded
-    // displacement. `cmpxchg` only has 32- and 64-bit forms, so narrower
-    // widths are performed as 32-bit operations on an aligned dword.
+    assembly.push_str(&load_scalar(instruction, 3, width, "%rdx")?); // desired -> caller-saved %rdx
+    // Address: the base register's full 64-bit value plus the encoded displacement.
     let (base, offset) = match instruction.operands.get(1) {
         Some(VerifiedOperand::Memory { base, offset }) => (*base, *offset),
         _ => return Err(error("compare.swap needs memory operand")),
@@ -552,10 +573,11 @@ fn emit_compare_swap(instruction: &VerifiedInstruction) -> Result<String, Native
     if offset != 0 {
         assembly.push_str(&format!("\taddq ${offset}, %rcx\n"));
     }
-    let comparison = if width == View::Q {
-        "cmpxchgq %rbx, (%rcx)"
-    } else {
-        "cmpxchgl %ebx, (%rcx)"
+    let comparison = match width {
+        View::B => "lock cmpxchgb %dl, (%rcx)",
+        View::W => "lock cmpxchgw %dx, (%rcx)",
+        View::D => "lock cmpxchgl %edx, (%rcx)",
+        View::Q => "lock cmpxchgq %rdx, (%rcx)",
     };
     assembly.push_str(&format!("\t{comparison}\n"));
     // %rax now holds the signalled (old) value; mask it to the operation width
@@ -565,7 +587,94 @@ fn emit_compare_swap(instruction: &VerifiedInstruction) -> Result<String, Native
     Ok(assembly)
 }
 
+/// Effective address of a memory operand, staged in `%rcx`.
+///
+/// The base is a full GPR (the verifier enforces it); its slot holds the full
+/// 64-bit value. The signed displacement is folded in with a single `addq`.
+fn emit_address(
+    instruction: &VerifiedInstruction,
+    operand_index: usize,
+) -> Result<String, NativeError> {
+    let (base, offset) = match instruction.operands.get(operand_index) {
+        Some(VerifiedOperand::Memory { base, offset }) => (*base, *offset),
+        _ => return Err(error("memory instruction needs a memory operand")),
+    };
+    let mut assembly = format!(
+        "\tmovq {}, %rcx\n",
+        offset_text(register_offset(base), "%rbp")
+    );
+    if offset != 0 {
+        assembly.push_str(&format!("\taddq ${offset}, %rcx\n"));
+    }
+    Ok(assembly)
+}
+
+fn emit_load(
+    instruction: &VerifiedInstruction,
+    ordering: Option<&str>,
+) -> Result<String, NativeError> {
+    let width = instruction
+        .width
+        .ok_or_else(|| error("load has no width"))?;
+    let Some(VerifiedOperand::Register(destination)) = instruction.operands.first() else {
+        return Err(error("load destination must be a register"));
+    };
+    let mut assembly = emit_address(instruction, 1)?;
+    let load = match width {
+        View::B => "\tmovzbq (%rcx), %rax\n",
+        View::W => "\tmovzwq (%rcx), %rax\n",
+        View::D => "\tmovl (%rcx), %eax\n",
+        View::Q => "\tmovq (%rcx), %rax\n",
+    };
+    assembly.push_str(load);
+    if let Some(fence) = ordering {
+        assembly.push_str(&format!("\t{fence}\n"));
+    }
+    assembly.push_str(&write_register(*destination, "%rax"));
+    Ok(assembly)
+}
+
+fn emit_store(
+    instruction: &VerifiedInstruction,
+    ordering: Option<&str>,
+) -> Result<String, NativeError> {
+    let width = instruction
+        .width
+        .ok_or_else(|| error("store has no width"))?;
+    let mut assembly = load_scalar(instruction, 1, width, "%rax")?;
+    assembly.push_str(&emit_address(instruction, 0)?);
+    let store = match width {
+        View::B => "\tmovb %al, (%rcx)\n",
+        View::W => "\tmovw %ax, (%rcx)\n",
+        View::D => "\tmovl %eax, (%rcx)\n",
+        View::Q => "\tmovq %rax, (%rcx)\n",
+    };
+    assembly.push_str(store);
+    if let Some(fence) = ordering {
+        assembly.push_str(&format!("\t{fence}\n"));
+    }
+    Ok(assembly)
+}
+
+/// Emit hosted x86-64 assembly for `image` (SysV `main` entry, libc-linked).
+///
+/// This is the assembly the JIT and the hosted AOT path use. For freestanding
+/// output (bootloaders, kernels) use [`emit_assembly_for`] with
+/// [`NativeTarget::Freestanding`].
 pub fn emit_assembly(image: &[u8]) -> Result<String, NativeError> {
+    emit_assembly_for(image, NativeTarget::Hosted)
+}
+
+/// Emit x86-64 assembly for `image` for the given native target.
+pub fn emit_assembly_for(image: &[u8], target: NativeTarget) -> Result<String, NativeError> {
+    emit_assembly_inner(image, target, false)
+}
+
+fn emit_assembly_inner(
+    image: &[u8],
+    target: NativeTarget,
+    trap_hosted_faults: bool,
+) -> Result<String, NativeError> {
     if !cfg!(target_arch = "x86_64") {
         return Err(error("native AOT currently requires an x86-64 host"));
     }
@@ -580,8 +689,12 @@ pub fn emit_assembly(image: &[u8]) -> Result<String, NativeError> {
     if function.instructions.is_empty() {
         return Err(error("native AOT does not accept an empty function"));
     }
-    let mut assembly = String::from(
-        ".text\n.globl main\n.type main,@function\nmain:\n\tpushq %rbp\n\tmovq %rsp, %rbp\n",
+    let entry_symbol = match target {
+        NativeTarget::Hosted => "main",
+        NativeTarget::Freestanding => "_start",
+    };
+    let mut assembly = format!(
+        ".text\n.globl {entry_symbol}\n.type {entry_symbol},@function\n{entry_symbol}:\n\tpushq %rbp\n\tmovq %rsp, %rbp\n"
     );
     assembly.push_str(&format!("\tsubq ${FRAME_SIZE}, %rsp\n"));
     for index in 0..32 {
@@ -628,13 +741,17 @@ pub fn emit_assembly(image: &[u8]) -> Result<String, NativeError> {
             // value that disagrees with the interpreter.
             0x000B => {
                 return Err(error(
-                    "opcode `address` is not supported by the native AOT backend: it names a bytecode offset, which native code does not use",
+                    "`address` (opcode 0x000b) is not supported by the native backends; see manual/JIT-AOT.md for the supported subset",
                 ));
             }
             0x000A => assembly.push_str(&emit_flag_direction(instruction)?),
             0x000C => assembly.push_str(&emit_fence(instruction)?),
             0x000D => assembly.push_str(&emit_compare_swap(instruction)?),
             0x0010 => assembly.push_str(&emit_move(instruction)?),
+            0x0040..=0x0043 => assembly.push_str(&emit_load(instruction, None)?),
+            0x0044..=0x0047 => assembly.push_str(&emit_store(instruction, None)?),
+            0x0080..=0x0083 => assembly.push_str(&emit_load(instruction, Some("lfence"))?),
+            0x0084..=0x0087 => assembly.push_str(&emit_store(instruction, Some("sfence"))?),
             0x0020..=0x0024 | 0x002a | 0x0030..=0x0035 => {
                 assembly.push_str(&emit_alu(instruction)?)
             }
@@ -650,42 +767,70 @@ pub fn emit_assembly(image: &[u8]) -> Result<String, NativeError> {
             }
         }
     }
-    // A runtime fault records a code in the exported fault word and leaves
-    // through `.Lexit`, so the caller can distinguish a fault from a `stop`.
-    // Faults are published through the exported word so the JIT loader (and
-    // any embedder) sees the same condition the interpreter would report. The
-    // address is taken through the GOT so the same assembly links both as a
-    // position-independent shared object and as a static executable.
-    assembly.push_str(&format!(
-        ".Lfault:\n\tmovq ${FAULT_FLAG}, {}\n.Lexit:\n",
-        offset_text(FAULT_FLAG_OFFSET, "%rbp")
-    ));
-    assembly.push_str(&format!(
-        "\tmovq {FAULT_SYMBOL}@GOTPCREL(%rip), %r11\n\
-         \tmovq {}, %rax\n\
-         \tmovl %eax, (%r11)\n\
-         \ttestq %rax, %rax\n\
-         \tjne .Lfault_exit\n\
-         \tmovq {}(%rbp), %rax\n\
-         \tleave\n\tret\n\
-         .Lfault_exit:\n\tmovl ${NATIVE_FAULT_EXIT}, %eax\n\tleave\n\tret\n\
-         .size main, .-main\n.section .note.GNU-stack,\"\",@progbits\n",
-        offset_text(FAULT_CODE_OFFSET, "%rbp"),
-        register_offset(VerifiedRegister {
-            index: 0,
-            view: View::Q
-        })
-    ));
-    assembly.push_str(&format!(
-        ".bss\n.align 8\n.globl {FAULT_SYMBOL}\n.type {FAULT_SYMBOL},@object\n.size {FAULT_SYMBOL},8\n{FAULT_SYMBOL}:\n\t.zero 8\n"
-    ));
+    match target {
+        NativeTarget::Hosted => {
+            // A runtime fault records a code in the exported fault word and
+            // leaves through `.Lexit`, so the caller can distinguish a fault
+            // from a `stop`. Faults are published through the exported word so
+            // the JIT loader (and any embedder) sees the same condition the
+            // interpreter would report. The address is taken through the GOT
+            // so the same assembly links both as a position-independent
+            // shared object and as a static executable.
+            assembly.push_str(&format!(
+                ".Lfault:\n\tmovq ${FAULT_FLAG}, {}\n.Lexit:\n",
+                offset_text(FAULT_FLAG_OFFSET, "%rbp")
+            ));
+            let fault_exit = if trap_hosted_faults {
+                "\tud2\n".to_owned()
+            } else {
+                format!("\tmovl ${NATIVE_FAULT_EXIT}, %eax\n\tleave\n\tret\n")
+            };
+            assembly.push_str(&format!(
+                "\tmovq {FAULT_SYMBOL}@GOTPCREL(%rip), %r11\n\
+                 \tmovq {}, %rax\n\
+                 \tmovl %eax, (%r11)\n\
+                 \ttestq %rax, %rax\n\
+                 \tjne .Lfault_exit\n\
+                 \tmovq {}(%rbp), %rax\n\
+                 \tleave\n\tret\n\
+                 .Lfault_exit:\n{fault_exit}\
+                 .size {entry_symbol}, .-{entry_symbol}\n.section .note.GNU-stack,\"\",@progbits\n",
+                offset_text(FAULT_CODE_OFFSET, "%rbp"),
+                register_offset(VerifiedRegister {
+                    index: 0,
+                    view: View::Q
+                })
+            ));
+            assembly.push_str(&format!(
+                ".bss\n.align 8\n.globl {FAULT_SYMBOL}\n.type {FAULT_SYMBOL},@object\n.size {FAULT_SYMBOL},8\n{FAULT_SYMBOL}:\n\t.zero 8\n"
+            ));
+        }
+        NativeTarget::Freestanding => {
+            // No libc, no return address to give back: `stop` (and a top-level
+            // `return`, via the sentinel) halts the CPU with the status in
+            // `%rax`, and a runtime fault traps with the fault code in
+            // `%rax`. The halt loop is the bare-metal convention: the
+            // bootloader or kernel that loaded this image inspects `%rax`.
+            assembly.push_str(&format!(
+                ".Lfault:\n\tmovq {}, %rax\n\tud2\n.Lexit:\n\tmovq {}(%rbp), %rax\n.Lhalt:\n\thlt\n\tjmp .Lhalt\n\
+                 .size {entry_symbol}, .-{entry_symbol}\n.section .note.GNU-stack,\"\",@progbits\n",
+                offset_text(FAULT_CODE_OFFSET, "%rbp"),
+                register_offset(VerifiedRegister {
+                    index: 0,
+                    view: View::Q
+                })
+            ));
+        }
+    }
     Ok(assembly)
 }
 
-pub fn compile_executable(image: &[u8], output: &Path) -> Result<(), NativeError> {
-    let assembly = emit_assembly(image)?;
+/// Run `cc` on `assembly` with the given arguments, feeding the assembly on
+/// stdin. Shared by the hosted, freestanding, and object-file link steps.
+fn run_cc(assembly: &str, arguments: &[&str], output: &Path) -> Result<(), NativeError> {
     let mut child = Command::new("cc")
-        .args(["-x", "assembler", "-", "-o"])
+        .args(arguments)
+        .arg("-o")
         .arg(output)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -708,6 +853,56 @@ pub fn compile_executable(image: &[u8], output: &Path) -> Result<(), NativeError
         )));
     }
     Ok(())
+}
+
+/// Compile `image` to a hosted standalone executable (SysV `main`, libc).
+pub fn compile_executable(image: &[u8], output: &Path) -> Result<(), NativeError> {
+    let assembly = emit_assembly(image)?;
+    run_cc(&assembly, &["-x", "assembler", "-"], output)
+}
+
+/// CLI execution uses a fault trap so normal status 70 remains distinguishable.
+pub(crate) fn compile_executable_for_run(image: &[u8], output: &Path) -> Result<(), NativeError> {
+    let assembly = emit_assembly_inner(image, NativeTarget::Hosted, true)?;
+    run_cc(&assembly, &["-x", "assembler", "-"], output)
+}
+
+/// Compile `image` to a freestanding executable: a static ELF with a `_start`
+/// entry and no libc, suitable for bootloaders and kernels.
+///
+/// `load_address`, when given, is passed to the linker as `-Ttext` to set
+/// the text virtual address. This emits an ELF, not a boot sector. The loader
+/// must enter in x86-64 long mode with a valid stack in `%rsp`; `stop` halts
+/// with the status in `%rax`. Bare-metal boot has not been validated.
+pub fn compile_freestanding(
+    image: &[u8],
+    output: &Path,
+    load_address: Option<u64>,
+) -> Result<(), NativeError> {
+    let assembly = emit_assembly_for(image, NativeTarget::Freestanding)?;
+    let mut arguments: Vec<String> = vec![
+        "-nostdlib".to_string(),
+        "-static".to_string(),
+        "-Wl,-e,_start".to_string(),
+        "-x".to_string(),
+        "assembler".to_string(),
+        "-".to_string(),
+    ];
+    if let Some(address) = load_address {
+        arguments.push(format!("-Wl,-Ttext=0x{address:x}"));
+    }
+    let references: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    run_cc(&assembly, &references, output)
+}
+
+/// Compile `image` to a relocatable object file (ET_REL) exporting `_start`.
+///
+/// The object carries the freestanding assembly and can be linked with other
+/// objects or a custom linker script by the caller's own build system, which
+/// is how a bootloader or kernel image is normally assembled.
+pub fn compile_object(image: &[u8], output: &Path) -> Result<(), NativeError> {
+    let assembly = emit_assembly_for(image, NativeTarget::Freestanding)?;
+    run_cc(&assembly, &["-c", "-x", "assembler", "-"], output)
 }
 
 /// List every instruction in `image` that the native backends cannot lower.

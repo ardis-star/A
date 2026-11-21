@@ -136,13 +136,35 @@ fn compile_shared(assembly: &str, path: &std::path::Path) -> Result<(), JitError
     Ok(())
 }
 
-/// Run `image` through the JIT and return its 64-bit `stop` status.
+/// Run a verified image without direct native memory operations.
 ///
-/// The value is the interpreter's `RunResult::Stopped` payload, so callers see
-/// the same bits from every execution tier. A VM fault is reported as an error
-/// rather than being folded into the status.
+/// The safe entry point refuses raw host memory access. The JIT is not a
+/// resource sandbox: untrusted programs may loop or exhaust the host stack.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn run_jit64(image: &[u8]) -> Result<u64, JitError> {
+    let decoded = crate::verifier::verify_image(image)
+        .map_err(|error| JitError(format!("verification failed: {error}")))?;
+    if decoded
+        .functions
+        .iter()
+        .flat_map(|function| &function.instructions)
+        .any(|instruction| matches!(instruction.opcode, 0x000d | 0x0040..=0x0047 | 0x0080..=0x0087))
+    {
+        return Err(JitError("JIT direct memory access requires the unsafe run_jit64_unchecked API; use the AVM for checked memory".into()));
+    }
+    // SAFETY: the verified image has no supported native memory instructions.
+    unsafe { run_jit64_unchecked(image) }
+}
+
+/// Run an image with direct native access to host memory.
+///
+/// # Safety
+/// The caller must ensure every address accessed by the program is valid for
+/// the entire access, has the required permissions and alignment, and obeys
+/// Rust aliasing and concurrency rules for the whole execution. Verification
+/// cannot establish these requirements. Do not use with untrusted images.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub unsafe fn run_jit64_unchecked(image: &[u8]) -> Result<u64, JitError> {
     let assembly = emit_assembly(image).map_err(|error| JitError(error.to_string()))?;
     let path = temporary_library_path()?;
     let result = (|| {
@@ -185,6 +207,17 @@ pub fn run_jit64(image: &[u8]) -> Result<u64, JitError> {
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 pub fn run_jit64(_image: &[u8]) -> Result<u64, JitError> {
+    Err(JitError(
+        "the current JIT requires Linux x86-64 and a local cc toolchain".into(),
+    ))
+}
+
+/// Run with direct host memory access (unsupported on this platform).
+///
+/// # Safety
+/// See the Linux implementation's host-memory requirements.
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+pub unsafe fn run_jit64_unchecked(_image: &[u8]) -> Result<u64, JitError> {
     Err(JitError(
         "the current JIT requires Linux x86-64 and a local cc toolchain".into(),
     ))

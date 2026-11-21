@@ -11,17 +11,23 @@ It provides its own instruction set, portable bytecode format, and execution too
 - **Virtual Register Architecture** — 32 64-bit general-purpose registers (`R0`–`R31`) with sub-register views (`.b`, `.w`, `.d`, `.q`). Architectural state (`PC`, `FLAGS`, the call stack) is machine state, not addressable registers.
 - **Architectural Flags** — Zero (`Z`), Sign (`S`), Carry (`C`), Overflow (`O`), Parity (`P`), and Direction (`D`) flags, with explicit updates through the `!` instruction suffix.
 - **Dataflow Arrow Syntax** — Clear `destination <- source` notation, avoiding traditional assembly operand-order ambiguity.
-- **Strict Bytecode Verification** — Validation of image magic, format versions, CRC32C section checksums, block jump tables, memory permissions, and instruction encodings.
+- **Strict Bytecode Verification** — Validation of image magic, format versions, CRC32C section checksums, block jump tables, and instruction encodings.
 - **Multi-Tier Execution**
   - **AVM:** Bounded bytecode interpreter with memory protection and fault handling. The reference tier.
   - **JIT:** x86-64 machine-code generation with W^X executable memory management.
   - **Native AOT:** Compilation of bytecode into standalone x86-64 Linux ELF executables.
 
-  The native tiers implement a documented **subset** of the instruction set (36
-  of 97 instructions; no memory access, exceptions, or `sys.*`). Requesting a
+  The native tiers implement a documented **subset** of the instruction set (51
+  of 97 instructions; no exceptions or `sys.*`). Requesting a
   native tier for a program outside that subset fails with a named error — it
-  never falls back to the interpreter. See
+  never falls back to the interpreter. The safe JIT and CLI reject raw memory
+  operations, which require an unsafe library API; AOT uses direct host memory. See
   [`manual/JIT-AOT.md`](manual/JIT-AOT.md).
+
+- **Freestanding Native Output** — Static `_start` ELF images with no libc and
+  a caller-chosen text address, plus relocatable object files, for use by a
+  compatible x86-64 long-mode loader. A minimal program booted under QEMU with
+  external boot infrastructure; direct hardware control is outside this subset.
 
 ## Architecture
 
@@ -125,15 +131,16 @@ stopped: 125
 
 ## Project Status
 
-**Current release: +A Core V1.1.0.**
+**+A Core V2.0.0 is finalized; it has not been published or tagged.**
 
 The implementation includes the assembler, bytecode format, verification system,
 AVM interpreter, JIT compiler, and native AOT backend. The AVM serves as the
 reference execution environment; the JIT and native compilation are additional
 execution paths over a documented subset of the instruction set.
 
-V1.1.0 is a correctness release: it fixes every defect found in the V1.0.0 audit
-and adds permanent regression coverage. See
+V2.0.0 adds native memory and freestanding ELF output, and hardens the verifier
+and CLI. The supported scope, safety boundaries, test evidence and remaining
+limitations are documented. See
 [`CHANGELOG.md`](CHANGELOG.md) for the complete list of fixes, semantic changes,
 and the exact test counts.
 
@@ -159,7 +166,7 @@ Public documentation lives in [`manual/`](manual/README.md):
 | [`manual/CLI.md`](manual/CLI.md) | Command-line reference |
 | [`manual/BUILD-AND-INSTALL.md`](manual/BUILD-AND-INSTALL.md) | Build, install, test, troubleshoot |
 | [`manual/SYS-ARCHITECTURE.md`](manual/SYS-ARCHITECTURE.md) | `sys.*` capability design (design only) |
-| [`manual/KNOWN-LIMITATIONS.md`](manual/KNOWN-LIMITATIONS.md) | What V1.1.0 cannot do |
+| [`manual/KNOWN-LIMITATIONS.md`](manual/KNOWN-LIMITATIONS.md) | What V2.0.0 cannot do |
 
 These documents are checked against the implementation where the claim is
 machine-checkable; see [`manual/README.md`](manual/README.md) for the test names.
@@ -169,11 +176,10 @@ machine-checkable; see [`manual/README.md`](manual/README.md) for the test names
 Run the complete test suite:
 
 ```bash
-cargo test --manifest-path rust/Cargo.toml --locked --offline --lib --tests
+cargo test --manifest-path rust/Cargo.toml --locked --offline
 ```
 
-`--lib --tests` avoids doc-tests, which need `rustdoc`; some minimal toolchains
-omit it and the failure looks like a test failure.
+This includes doc-tests and requires `rustdoc`. See the [acceptance checklist](manual/V2-ACCEPTANCE.md) for release validation and the QEMU test.
 
 Run Clippy:
 

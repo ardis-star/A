@@ -1,12 +1,11 @@
 # +A Verification Rules
 
-**Edition:** ASCENSION +A Core V1.1.0
+**Edition:** ASCENSION +A Core V2.0.0
 
 The verifier is the gate between a byte sequence and execution. Nothing executes
 — in the interpreter, the JIT, or AOT code — without passing it. This document
-lists the rules in the order they are applied. Every rule has at least one test
-in `rust/tests/verifier.rs` or `rust/tests/regressions.rs`; the rule text below
-is the message the verifier actually prints.
+summarizes implementation rules and representative diagnostics. Tests cover many,
+but not necessarily all, rules.
 
 `+a verify <image>` applies the whole pipeline. `+a inspect <image>` applies only
 the structural half and then prints section details, which is why `inspect` can
@@ -19,19 +18,21 @@ control flow).
 |---|---|
 | The image is at least 40 bytes | `truncated image header` |
 | Magic is `A+BC` | `invalid image magic` |
-| Major version is `1` | `unsupported bytecode version` |
+| Major version is `1`, minor version is `0` or `1` | `unsupported bytecode version` |
 | Header size is 40 | `invalid header size` |
 | Header flags and reserved word are zero | `reserved header fields must be zero` |
 | Declared total size equals the buffer length | `declared file size does not match image` |
 | Section directory does not overlap the header | `section directory overlaps image header` |
 | Section count is representable and within the format ceiling | `section count is not representable`, `section count exceeds v1 format ceiling` |
 | Each directory entry fits in the buffer | `directory entry overflow` |
-| Each payload offset is 8-byte aligned | `section offset violates required alignment` |
-| Section payloads do not overlap and stay in the image | `directory index overflow`, `section directory size overflow` |
-| No duplicate section types | rejected during directory parsing |
-| Required sections are present and marked required | `unknown required section`, `unknown required section flags` |
-| CRC-32C matches each payload | rejected during directory parsing |
+| Each payload offset respects its declared power-of-two alignment | `section offset violates required alignment` |
+| Section payloads do not overlap the header, the directory, or each other, and stay in the image | `section overlaps header, directory, or another section` |
+| No duplicate section types | `duplicate section type N` |
+| Required sections (`DATA`, `CODE`, `CAPS`) are present | `required section N is missing` |
+| Only `BLOCKS` may be marked required, and it must be | `unknown required section`, `unknown required section flags`, `BLOCKS section must be marked required` |
+| CRC-32C matches each payload | `section N checksum mismatch` |
 | Image size is at most 256 MiB | `image exceeds v1 format ceiling` |
+| `BLOCKS` requires minor version 1 | `BLOCKS section requires bytecode minor version 1` |
 
 ## 2. `CODE` rules
 
@@ -40,7 +41,8 @@ control flow).
 | Function count is present and representable | `truncated CODE function count`, `function count is not representable` |
 | Descriptor table fits | `function descriptor table overflow`, `truncated function descriptor table` |
 | Function IDs are dense and ordered | `function IDs must be dense and ordered` |
-| Function flags are known | `unknown function flags` |
+| Function flags are known (must be `0`) | `unknown function flags` |
+| Function ABI shape within limits (≤8 args, ≤2 results) | `function ABI shape exceeds v1 limits` |
 | Code length within the per-function ceiling | `function code exceeds v1 format ceiling` |
 | Code does not overlap the descriptor table or another function | `function code overlaps descriptor table`, `function code ranges overlap` |
 | Instruction count within the ceiling | `instruction count exceeds v1 format ceiling` |
@@ -53,7 +55,7 @@ control flow).
 | Rule | Message |
 |---|---|
 | Instruction header (`opcode`, `count`, `width`, `len`) is present | `truncated instruction header` |
-| Opcode is defined | `opcode has invalid operand count` / verification failure naming the opcode |
+| Opcode is defined | `unknown opcode 0xNNNN` |
 | Operand count matches the instruction shape | `opcode has invalid operand count` |
 | Operand width code agrees with the opcode | `opcode and instruction width code disagree` |
 | Width-taking opcodes carry a width | `opcode requires a width` |
@@ -63,11 +65,13 @@ control flow).
 | Register view bits are in range | `register operand has reserved view bits` |
 | Immediates fit the operation width | `immediate does not fit instruction width` |
 | Exchange operands are full GPRs | `exchange requires full GPRs` |
-| Extension operands are registers | `extension operands must be registers` |
+| Extension operands are registers, narrower source, source width code | `extension operands must be registers`, `extension requires a narrower source and source width code` |
 | Memory base is a full GPR | `memory base must be a full GPR` |
 | Memory displacement fits 32 bits | `memory offset does not fit 32 bits` |
 | Memory access width matches the register view | `memory opcode register view does not match width` |
 | Predicates are known | `unknown predicate operand` |
+| Mode operands are in range (`flag.direction` 0–1, `fence` 0–2) | `mode operand is outside its defined range` |
+| Symbol operands name an existing `SYMS` entry | `symbol index is outside SYMS section` |
 
 ## 4. Control-flow rules
 
@@ -82,7 +86,7 @@ control flow).
 | No unresolved control targets remain | `block target offsets are not represented in this image format; control-flow image cannot be execution-verified` |
 | `uncatch` never pops below the handlers a function pushed | `handler stack underflow in function N` |
 
-The last rule in the table above is what makes an image *execution-verifiable*:
+The unresolved-target rule above contributes to execution verification:
 minor version 0 images can carry branch targets that the format cannot resolve,
 and `verify_image` refuses them rather than guessing. This is the documented,
 intentional behaviour behind `unresolved_control_targets`.
@@ -96,7 +100,7 @@ intentional behaviour behind `unresolved_control_targets`.
 | Symbol function IDs are inside the table | `symbol function ID is outside function table` |
 | `CAPS` payload length equals the record count exactly | `CAPS section length does not match record count` |
 | `EXCP` ranges are non-empty and ordered | `exception protected range is empty or inverted`, `exception protected ranges overlap`, `exception handler lies inside its protected range` |
-| `DATA` records fit in the section | `DATA section length does not match record count`, `data record range overflow` |
+| `DATA` payload length matches the record count and no record range overflows | `DATA section length does not match record count`, `data record range overflow` |
 
 The `CAPS` rule is deliberately an **equality** check. Trailing bytes in a
 capability section are an error, not padding: an image that appends data after

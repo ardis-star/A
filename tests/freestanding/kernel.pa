@@ -1,0 +1,15 @@
+;; This runs in long mode after the test bootstrap maps RAM and sets a stack.
+export main
+main::
+    move R1.q <- 0x300000
+    move R2.q <- 0x1122334455667788
+    store.u64 [R1.q] <- R2.q
+    load.u64 R3.q <- [R1.q]
+    compare! R3.q, R2.q
+    if.notzero -> failed
+    move R0.q <- 40
+    sum R0.q <- R0.q, 2
+    stop
+failed::
+    move R0.q <- 1
+    stop

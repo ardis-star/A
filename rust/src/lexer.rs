@@ -55,13 +55,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             continue;
         }
         if current == ';' && characters.get(position + 1) == Some(&';') {
-            while position < characters.len() && characters[position] != '\n' {
+            while position < characters.len() && !matches!(characters[position], '\n' | '\r') {
                 position += 1;
                 column += 1;
             }
             continue;
         }
-        if current == '\n' {
+        if current == '\n' || current == '\r' {
+            // LF, CRLF, and lone CR are all line endings. The CLI normalises
+            // CRLF before lexing, but the library must accept it too so that
+            // `assemble` behaves the same however the source was read.
             tokens.push(Token {
                 kind: TokenKind::Newline,
                 text: "\n".into(),
@@ -69,6 +72,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                 column,
             });
             position += 1;
+            if current == '\r' && characters.get(position) == Some(&'\n') {
+                position += 1;
+            }
             line += 1;
             column = 1;
             continue;

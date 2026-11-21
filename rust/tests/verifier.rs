@@ -265,3 +265,191 @@ fn verifier_missing_required_section_rejected() {
             .contains("required section")
     );
 }
+
+/// Locate the CODE section payload and its directory entry, so a test can
+/// patch instruction bytes and repair the section CRC.
+fn code_section(image: &[u8]) -> (usize, usize) {
+    let count = u32_at(image, 28) as usize;
+    for index in 0..count {
+        let entry = 40 + index * 32;
+        if u32_at(image, entry) == 4 {
+            let offset = u64_at(image, entry + 8) as usize;
+            return (entry, offset);
+        }
+    }
+    panic!("no CODE section");
+}
+
+fn repair_code_crc(image: &mut [u8]) {
+    let (entry, offset) = code_section(image);
+    let length = u64_at(image, entry + 16) as usize;
+    let crc = crc32c(&image[offset..offset + length]);
+    image[entry + 28..entry + 32].copy_from_slice(&crc.to_le_bytes());
+}
+
+/// A `fence` mode outside 0..=2 must be rejected at verification time, not
+/// silently accepted by the AVM while the native backend refuses it.
+#[test]
+fn verifier_fence_mode_outside_defined_range_rejected() {
+    let image = assemble("export main\nmain::\n    fence full\n    stop\n").unwrap();
+    assert!(verify_image(&image).is_ok());
+    let mut patched = image.clone();
+    let (_, offset) = code_section(&patched);
+    // Instruction stream starts at CODE+36: opcode(2) count(1) width(1)
+    // payload_len(1) then payload tag(1) + ULEB mode.
+    let mode_at = offset + 36 + 6;
+    assert_eq!(patched[mode_at], 2);
+    patched[mode_at] = 5;
+    repair_code_crc(&mut patched);
+    assert!(
+        verify_image(&patched)
+            .unwrap_err()
+            .to_string()
+            .contains("outside its defined range")
+    );
+}
+
+/// A `flag.direction` mode outside 0..=1 must be rejected at verification time.
+#[test]
+fn verifier_flag_direction_mode_outside_defined_range_rejected() {
+    let image =
+        assemble("export main\nmain::\n    flag.direction <- backward\n    stop\n").unwrap();
+    assert!(verify_image(&image).is_ok());
+    let mut patched = image.clone();
+    let (_, offset) = code_section(&patched);
+    let mode_at = offset + 36 + 6;
+    assert_eq!(patched[mode_at], 1);
+    patched[mode_at] = 2;
+    repair_code_crc(&mut patched);
+    assert!(
+        verify_image(&patched)
+            .unwrap_err()
+            .to_string()
+            .contains("outside its defined range")
+    );
+}
+
+/// An `address` operand naming a symbol index outside SYMS must be rejected
+/// at verification time rather than faulting only at run time.
+#[test]
+fn verifier_symbol_index_outside_syms_rejected() {
+    let image = assemble("export main\nmain::\n    address R0.q <- main\n    stop\n").unwrap();
+    assert!(verify_image(&image).is_ok());
+    let mut patched = image.clone();
+    let (_, offset) = code_section(&patched);
+    // address payload: register tag+byte, symbol tag(6), ULEB index.
+    // Header(4) + payload_len(1) + reg tag(1) + reg byte(1) + sym tag(1) = index at +8.
+    let index_at = offset + 36 + 8;
+    assert_eq!(patched[index_at], 0);
+    patched[index_at] = 99;
+    repair_code_crc(&mut patched);
+    assert!(
+        verify_image(&patched)
+            .unwrap_err()
+            .to_string()
+            .contains("outside SYMS")
+    );
+}
+
+#[test]
+fn verifier_rejects_forged_symbol_count_before_allocation() {
+    let mut image = assemble("export main\nmain::\n stop\n").unwrap();
+    let count = u32_at(&image, 28) as usize;
+    let entry = (0..count)
+        .map(|i| 40 + i * 32)
+        .find(|&i| u32_at(&image, i) == 5)
+        .unwrap();
+    let offset = u64_at(&image, entry + 8) as usize;
+    let length = u64_at(&image, entry + 16) as usize;
+    image[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let crc = crc32c(&image[offset..offset + length]);
+    image[entry + 28..entry + 32].copy_from_slice(&crc.to_le_bytes());
+    assert!(
+        verify_image(&image)
+            .unwrap_err()
+            .to_string()
+            .contains("truncated SYMS")
+    );
+}
+
+// At the format ceiling, decoding should scale with the number of records,
+// not rescan every function range and every block for each function. Run this
+// under the timeout documented in manual/V2-ACCEPTANCE.md.
+#[test]
+fn verifier_large_multifunction_image_scales() {
+    const COUNT: usize = 65_536;
+    let mut image = assemble("export main\nmain::\n stop\n").unwrap();
+    let mut code = Vec::with_capacity(4 + COUNT * 37);
+    code.extend_from_slice(&(COUNT as u32).to_le_bytes());
+    let start = 4 + COUNT * 32;
+    for id in 0..COUNT {
+        code.extend_from_slice(&(id as u32).to_le_bytes());
+        code.extend_from_slice(&0u32.to_le_bytes());
+        code.extend_from_slice(&((start + id * 5) as u64).to_le_bytes());
+        code.extend_from_slice(&5u64.to_le_bytes());
+        code.extend_from_slice(&[0; 8]);
+    }
+    for _ in 0..COUNT {
+        code.extend_from_slice(&[1, 0, 0, 0, 0]); // nop
+    }
+    let (entry, _) = code_section(&image);
+    let new_offset = (image.len() + 7) & !7;
+    image.resize(new_offset, 0);
+    image.extend_from_slice(&code);
+    image[entry + 8..entry + 16].copy_from_slice(&(new_offset as u64).to_le_bytes());
+    image[entry + 16..entry + 24].copy_from_slice(&(code.len() as u64).to_le_bytes());
+    image[entry + 28..entry + 32].copy_from_slice(&crc32c(&code).to_le_bytes());
+    let len = image.len() as u64;
+    image[12..20].copy_from_slice(&len.to_le_bytes());
+    image[6..8].copy_from_slice(&1u16.to_le_bytes());
+    let mut blocks = Vec::with_capacity(4 + COUNT * 16);
+    blocks.extend_from_slice(&(COUNT as u32).to_le_bytes());
+    for id in 0..COUNT {
+        blocks.extend_from_slice(&(id as u32).to_le_bytes());
+        blocks.extend_from_slice(&0u32.to_le_bytes());
+        blocks.extend_from_slice(&0u64.to_le_bytes());
+    }
+    let image = with_section(&image, 9, 1, &blocks);
+    assert_eq!(verify_image(&image).unwrap().functions.len(), COUNT);
+}
+
+#[test]
+fn verifier_detects_function_overlap_in_either_order() {
+    fn make(offsets: [u64; 2], lengths: [u64; 2]) -> Vec<u8> {
+        let mut image = assemble("export main\nmain::\n stop\n").unwrap();
+        let mut code = Vec::new();
+        code.extend_from_slice(&2u32.to_le_bytes());
+        for id in 0..2 {
+            code.extend_from_slice(&(id as u32).to_le_bytes());
+            code.extend_from_slice(&0u32.to_le_bytes());
+            code.extend_from_slice(&(68 + offsets[id]).to_le_bytes());
+            code.extend_from_slice(&lengths[id].to_le_bytes());
+            code.extend_from_slice(&[0; 8]);
+        }
+        code.extend_from_slice(&[1, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+        let (entry, _) = code_section(&image);
+        let offset = (image.len() + 7) & !7;
+        image.resize(offset, 0);
+        image.extend_from_slice(&code);
+        image[entry + 8..entry + 16].copy_from_slice(&(offset as u64).to_le_bytes());
+        image[entry + 16..entry + 24].copy_from_slice(&(code.len() as u64).to_le_bytes());
+        image[entry + 28..entry + 32].copy_from_slice(&crc32c(&code).to_le_bytes());
+        let len = image.len() as u64;
+        image[12..20].copy_from_slice(&len.to_le_bytes());
+        image
+    }
+    assert!(verify_image(&make([5, 0], [5, 5])).is_ok());
+    assert!(
+        verify_image(&make([0, 5], [10, 5]))
+            .unwrap_err()
+            .to_string()
+            .contains("function code ranges overlap")
+    );
+    assert!(
+        verify_image(&make([5, 0], [5, 10]))
+            .unwrap_err()
+            .to_string()
+            .contains("function code ranges overlap")
+    );
+    assert!(verify_image(&make([0, 2], [5, 0])).is_ok());
+}

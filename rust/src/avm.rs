@@ -508,11 +508,9 @@ impl Avm {
             });
         }
         let (index, range) = self.region_index_range(address, length, true, true)?;
-        let old = u64::from_le_bytes(
-            self.regions[index].bytes[range.start..range.start + length]
-                .try_into()
-                .map_err(|_| AvmError::MemoryAccess { address, length })?,
-        );
+        let mut bytes = [0u8; 8];
+        bytes[..length].copy_from_slice(&self.regions[index].bytes[range.start..range.end]);
+        let old = u64::from_le_bytes(bytes);
         if old == expected {
             let bytes = desired.to_le_bytes();
             self.regions[index].bytes[range.start..range.start + length]

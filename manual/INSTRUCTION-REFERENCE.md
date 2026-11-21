@@ -1,8 +1,12 @@
 # +A Instruction Reference
 
-**Edition:** ASCENSION +A Core V1.1.0
+**Edition:** ASCENSION +A Core V2.0.0
 
-Complete list of the 97 instructions the V1.1.0 toolchain defines. The
+The Native column describes emitter support. The safe JIT API and CLI reject
+raw memory operations; only the explicitly unsafe JIT API may execute them.
+See [JIT-AOT.md](JIT-AOT.md).
+
+Complete list of the 97 instructions the V2.0.0 toolchain defines. The
 table is generated from `rust/src/instructions.rs` and `rust/src/native.rs`,
 and `instruction_reference_covers_every_defined_mnemonic` in
 `rust/tests/regressions.rs` fails if this file disagrees with the code in
@@ -140,33 +144,33 @@ Column meanings:
 
 | Mnemonic | Opcode | Form | Width? | Native? | Notes |
 |---|---|---|---|---|---|
-| `load.u8` | `0x0040` | `mnemonic dest <- [base + off]` | yes | — | Zero-extending 8-bit load from `[base + offset]`. |
-| `load.u16` | `0x0041` | `mnemonic dest <- [base + off]` | yes | — | Zero-extending 16-bit load. |
-| `load.u32` | `0x0042` | `mnemonic dest <- [base + off]` | yes | — | Zero-extending 32-bit load. |
-| `load.u64` | `0x0043` | `mnemonic dest <- [base + off]` | yes | — | 64-bit load. |
-| `store.u8` | `0x0044` | `mnemonic [base + off] <- src` | yes | — | 8-bit store to `[base + offset]`. |
-| `store.u16` | `0x0045` | `mnemonic [base + off] <- src` | yes | — | 16-bit store. |
-| `store.u32` | `0x0046` | `mnemonic [base + off] <- src` | yes | — | 32-bit store. |
-| `store.u64` | `0x0047` | `mnemonic [base + off] <- src` | yes | — | 64-bit store. |
+| `load.u8` | `0x0040` | `mnemonic dest <- [base + off]` | yes | yes | Zero-extending 8-bit load from `[base + offset]`. |
+| `load.u16` | `0x0041` | `mnemonic dest <- [base + off]` | yes | yes | Zero-extending 16-bit load. |
+| `load.u32` | `0x0042` | `mnemonic dest <- [base + off]` | yes | yes | Zero-extending 32-bit load. |
+| `load.u64` | `0x0043` | `mnemonic dest <- [base + off]` | yes | yes | 64-bit load. |
+| `store.u8` | `0x0044` | `mnemonic [base + off] <- src` | yes | yes | 8-bit store to `[base + offset]`. |
+| `store.u16` | `0x0045` | `mnemonic [base + off] <- src` | yes | yes | 16-bit store. |
+| `store.u32` | `0x0046` | `mnemonic [base + off] <- src` | yes | yes | 32-bit store. |
+| `store.u64` | `0x0047` | `mnemonic [base + off] <- src` | yes | yes | 64-bit store. |
 
 ## Atomic memory
 
 | Mnemonic | Opcode | Form | Width? | Native? | Notes |
 |---|---|---|---|---|---|
-| `load.acquire.u8` | `0x0080` | `mnemonic dest <- [base + off]` | yes | — | 8-bit load with acquire ordering; requires a shared, atomic region and natural alignment. |
-| `load.acquire.u16` | `0x0081` | `mnemonic dest <- [base + off]` | yes | — | 16-bit acquire load. |
-| `load.acquire.u32` | `0x0082` | `mnemonic dest <- [base + off]` | yes | — | 32-bit acquire load. |
-| `load.acquire.u64` | `0x0083` | `mnemonic dest <- [base + off]` | yes | — | 64-bit acquire load. |
-| `store.release.u8` | `0x0084` | `mnemonic [base + off] <- src` | yes | — | 8-bit store with release ordering; requires a shared, atomic region and natural alignment. |
-| `store.release.u16` | `0x0085` | `mnemonic [base + off] <- src` | yes | — | 16-bit release store. |
-| `store.release.u32` | `0x0086` | `mnemonic [base + off] <- src` | yes | — | 32-bit release store. |
-| `store.release.u64` | `0x0087` | `mnemonic [base + off] <- src` | yes | — | 64-bit release store. |
+| `load.acquire.u8` | `0x0080` | `mnemonic dest <- [base + off]` | yes | yes | 8-bit load with acquire ordering; requires a shared, atomic region and natural alignment. |
+| `load.acquire.u16` | `0x0081` | `mnemonic dest <- [base + off]` | yes | yes | 16-bit acquire load. |
+| `load.acquire.u32` | `0x0082` | `mnemonic dest <- [base + off]` | yes | yes | 32-bit acquire load. |
+| `load.acquire.u64` | `0x0083` | `mnemonic dest <- [base + off]` | yes | yes | 64-bit acquire load. |
+| `store.release.u8` | `0x0084` | `mnemonic [base + off] <- src` | yes | yes | 8-bit store with release ordering; requires a shared, atomic region and natural alignment. |
+| `store.release.u16` | `0x0085` | `mnemonic [base + off] <- src` | yes | yes | 16-bit release store. |
+| `store.release.u32` | `0x0086` | `mnemonic [base + off] <- src` | yes | yes | 32-bit release store. |
+| `store.release.u64` | `0x0087` | `mnemonic [base + off] <- src` | yes | yes | 64-bit release store. |
 
 ## Synchronisation
 
 | Mnemonic | Opcode | Form | Width? | Native? | Notes |
 |---|---|---|---|---|---|
-| `address` | `0x000B` | `mnemonic dest <- symbol` | yes | yes | Place a symbol's code address in a destination. Native backends reject it. |
+| `address` | `0x000B` | `mnemonic dest <- symbol` | yes | — | Place a symbol's code address in a destination. Native backends reject it. |
 | `compare.swap` | `0x000D` | `mnemonic dest <- [base+off], expected, desired` | yes | yes | Atomically replace the word with `desired` when it equals `expected`; the old value goes to the destination. |
 | `exchange` | `0x0060` | `mnemonic a, b` | — | yes | Swap two full registers. |
 
@@ -189,9 +193,9 @@ Column meanings:
 ## Coverage summary
 
 * **Defined instructions:** 97.
-* **Native:** 36.
-* **Interpreter-only:** 61.
+* **Native:** 51.
+* **Interpreter-only:** 46.
 
 Interpreter-only instructions:
 
-`bit.clear`, `bit.set`, `bit.test!`, `break`, `catch`, `checked.sum`, `dec`, `dec!`, `diffc`, `diffc!`, `extend.s`, `extend.z`, `inc`, `inc!`, `load.acquire.u16`, `load.acquire.u32`, `load.acquire.u64`, `load.acquire.u8`, `load.u16`, `load.u32`, `load.u64`, `load.u8`, `mul`, `neg`, `neg!`, `not`, `not!`, `raise`, `rotate.l`, `rotate.l!`, `rotate.r`, `rotate.r!`, `select`, `shift.ar`, `shift.ar!`, `shift.l`, `shift.l!`, `shift.r`, `shift.r!`, `store.release.u16`, `store.release.u32`, `store.release.u64`, `store.release.u8`, `store.u16`, `store.u32`, `store.u64`, `store.u8`, `sumc`, `sumc!`, `sys.context.enter`, `sys.context.return`, `sys.cpu.control`, `sys.irq.bind`, `sys.irq.disable`, `sys.irq.enable`, `sys.port.read`, `sys.port.write`, `sys.power`, `sys.region.map`, `sys.region.unmap`, `uncatch`
+`address`, `bit.clear`, `bit.set`, `bit.test!`, `break`, `catch`, `checked.sum`, `dec`, `dec!`, `diffc`, `diffc!`, `extend.s`, `extend.z`, `inc`, `inc!`, `mul`, `neg`, `neg!`, `not`, `not!`, `raise`, `rotate.l`, `rotate.l!`, `rotate.r`, `rotate.r!`, `select`, `shift.ar`, `shift.ar!`, `shift.l`, `shift.l!`, `shift.r`, `shift.r!`, `sumc`, `sumc!`, `sys.context.enter`, `sys.context.return`, `sys.cpu.control`, `sys.irq.bind`, `sys.irq.disable`, `sys.irq.enable`, `sys.port.read`, `sys.port.write`, `sys.power`, `sys.region.map`, `sys.region.unmap`, `uncatch`

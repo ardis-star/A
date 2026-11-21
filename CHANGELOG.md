@@ -2,6 +2,139 @@
 
 All notable changes to the ASCENSION +A toolchain will be documented in this file.
 
+## [2.0.0] - Unreleased
+
+**+A Core V2.0.0 — finalized, not yet published.** The assembler, bytecode,
+verifier, AVM, documented JIT/AOT subset, CLI, installation and freestanding
+output have been validated within their stated scope. Arbitrary machine-level
+interop and complete OS interfaces are outside Core V2.0.0; the documented
+freestanding path uses external boot infrastructure. The bytecode version is
+unchanged, but stricter verification can reject previously accepted malformed
+images. Compatibility has been tested against representative V1.1.0 fixtures,
+not exhaustively against all prior artifacts.
+
+### Added
+
+- **Native memory access.** All 16 memory instructions (`load.*`, `store.*`,
+  `load.acquire.*`, `store.release.*`) are now lowered by the JIT and AOT
+  backends. The native subset grows from 36 to 51 of 97 instructions. Native
+  memory is direct host memory (no region checks); an invalid address crashes
+  with a host signal or corrupt host memory. Safe JIT entry points and the CLI
+  reject memory instructions; `unsafe run_jit64_unchecked` exposes them to
+  callers responsible for host-memory safety. See `manual/JIT-AOT.md` §1.1.
+  *Tests:* `native_memory_matches_the_interpreter`,
+  `native_narrow_and_ordered_memory_matches`.
+- **Freestanding native output.** `+a compile-native` and `+a build --native`
+  accept `--freestanding` (static `_start` ELF, no libc, optional
+  `--load-address`), `--object` (relocatable ET_REL object), and
+  `--load-address <addr>` (`-Ttext`). `stop` halts with the status in `%rax`;
+  a fault traps with the fault code in `%rax`. Library API:
+  `native::emit_assembly_for`, `native::compile_freestanding`,
+  `native::compile_object`, `native::NativeTarget`. See
+  `manual/JIT-AOT.md` §8.
+  *Tests:* `freestanding_output_is_a_static_start_image`,
+  `object_output_is_relocatable`, `test_cli_freestanding_and_object_builds`.
+
+### Fixed
+
+1. **`NATIVE_OPCODE_RANGES` claimed `address` was native.** The range
+   `0x000A..=0x000D` included `0x000B`, but the emitter rejected `address`,
+   so `unsupported_instructions` never listed it and the refusal surfaced as
+   a late emitter error instead of the named upfront refusal. The range now
+   excludes `0x000B`, and the instruction reference agrees.
+   *Test:* `instruction_reference_covers_every_defined_mnemonic`,
+   `native_refusal_names_the_unsupported_instruction`.
+2. **The verifier accepted out-of-range mode operands.** A hand-crafted image
+   could carry `fence` mode 5 or `flag.direction` mode 2; the AVM accepted
+   them while the native backend refused, so tiers disagreed. The verifier
+   now rejects them with `mode operand is outside its defined range`.
+   *Tests:* `verifier_fence_mode_outside_defined_range_rejected`,
+   `verifier_flag_direction_mode_outside_defined_range_rejected`.
+3. **The verifier accepted `address` operands naming missing symbols.** An
+   out-of-range symbol index passed verification and faulted only at run
+   time. It is now rejected with `symbol index is outside SYMS section`.
+   *Test:* `verifier_symbol_index_outside_syms_rejected`.
+4. **The library lexer rejected CRLF.** `assemble()` failed on `\r\n` line
+   endings; only the CLI normalised them. The lexer now treats LF, CRLF, and
+   CR as line endings, so the library and CLI agree.
+   *Test:* `crlf_source_assembles_via_library`.
+5. **Direct `+a <source.pa>` silently ignored contradictory flags.**
+   `--jit --native` together ran the JIT without complaint, and `-o` combined
+   with `--native`/`--jit` wrote bytecode while ignoring the tier. Both are
+   now errors, matching `run`.
+   *Test:* `test_cli_direct_mode_rejects_contradictory_flags`.
+6. **Clippy `-D warnings` failed.** Four `uninlined_format_args` lints in
+   `bytecode.rs` and `cli.rs` are fixed, so the documented lint command is
+   clean again.
+
+7. **Narrow `compare.swap` was broken.** The AVM attempted to convert a short
+   slice into an eight-byte array, and native code used a 32-bit operation for
+   byte/word widths, lacked the `lock` prefix and clobbered a callee-saved
+   register. Both tiers now use the requested width; native uses locked CAS
+   and a caller-saved register. Regression: `compare_swap_all_widths_preserves_adjacent_bytes_and_matches_jit`.
+8. **Native direction flag handling violated the host ABI.** It used `std`/`cld`
+   rather than updating the virtual FLAGS slot. It now updates virtual state
+   without leaving the host direction flag set.
+9. **A forged `SYMS` count could cause excessive allocation.** The verifier
+   bounds the count by the section size before allocation. Exception range
+   overlap and block-boundary checks also avoid quadratic scans.
+10. **Object output silently ignored `--load-address`.** This combination is
+    now rejected; relocation addresses must be chosen at link time.
+11. **Safe JIT functions allowed arbitrary host memory access.** They now
+    reject memory instructions; trusted callers can explicitly use
+    `unsafe run_jit64_unchecked` with its safety requirements.
+
+12. **CLI native runs confused stop status 70 with a fault and ignored signal
+    termination.** CLI-run executables now trap VM faults; signals are errors
+    and a normal status of 70 is reported normally. Standalone binaries keep
+    their existing exit-70 convention.
+13. **Large multi-function images triggered quadratic verifier scans.**
+    Function ranges are indexed and block records grouped by function. The
+    maximum-count stress test verifies 65,536 functions and blocks.
+
+### Changed behaviour (observable; documented, not silent)
+
+| Change | Affects | Rationale |
+|---|---|---|
+| Native subset is 51 of 97 (was 36) | native workflows | memory access is now lowered; `address` is correctly excluded |
+| `META` producer string is `+A assembler 2.0.0` (was `0.1`) | golden images | version synchronisation; content is informational only |
+| Out-of-range modes and symbol indices fail verification | hand-crafted images | invalid bytecode is rejected at the gate, not at run time |
+| Direct mode rejects `--jit --native` and `-o` with a tier | CLI users | contradictory requests now fail instead of being ignored |
+
+### Test results (executed, V2.0.0)
+
+```
+cargo test --locked --offline
+tests/assembler.rs   73 passed, 1 ignored
+tests/avm.rs         36 passed
+tests/cli.rs         14 passed
+tests/regressions.rs 36 passed
+tests/compatibility.rs 1 passed
+tests/verifier.rs    22 passed
+                     ────────────────────
+                    182 passed, 1 ignored, 0 failed
+```
+
+On pinned Rust 1.97.0, doc-tests (zero examples), `cargo fmt -- --check`, and
+`cargo clippy --locked --offline --all-targets --all-features -- -D warnings`
+passed. A clean-source build and installation passed, and a minimal +A kernel
+booted under QEMU 11.0.2; see `manual/V2-ACCEPTANCE.md`.
+
+### Compatibility
+
+- **Bytecode format**: the A+BC major version remains 1 (minor 0 or 1).
+  The producer `META` string differs and
+  malformed inputs are checked more strictly. Compatibility with
+  prior release artifacts has not been exhaustively tested; five V1.1.0
+  example images verify and run as regression fixtures.
+- **Rust API**: `run_jit` and `run_jit64` now reject memory instructions;
+  trusted embeddings can use the new unsafe API. `emit_assembly` retains its signature and
+  meaning (hosted target); `emit_assembly_for`, `compile_freestanding`,
+  `compile_object`, and `NativeTarget` are new.
+- **CLI**: additive, except that contradictory or unsupported requests now
+  fail instead of being ignored (see "Changed behaviour").
+- **Release tags**: `v1.0.0` and `v1.1.0` are untouched.
+
 ## [1.1.0] - 2026-11-21
 
 **+A Core V1.1.0 — correctness release.** Every defect found in the V1.0.0 audit

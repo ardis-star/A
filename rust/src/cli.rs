@@ -8,7 +8,10 @@ use std::process::ExitCode;
 use crate::assemble;
 use crate::avm::{Avm, RunResult};
 use crate::jit::run_jit64;
-use crate::native::{compile_executable, unsupported_instructions};
+use crate::native::{
+    compile_executable, compile_executable_for_run, compile_freestanding, compile_object,
+    unsupported_instructions,
+};
 use crate::verifier::{decode_image, verify_image};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -37,6 +40,10 @@ OPTIONS:
     --build-dir <dir>       Directory for generated files (default: ./build)
     --native, -n            Build or execute as native x86-64 binary
     --jit                   Execute with JIT compiler instead of interpreter
+    --freestanding          Emit a freestanding (_start, no libc) native image
+                            for bootloaders/kernels (with --native)
+    --object                Emit a relocatable object file instead of linking
+    --load-address <addr>   Load address for freestanding output (hex or decimal)
 
 FILE EXTENSIONS:
     .pa     +A source file (official extension)
@@ -214,6 +221,7 @@ fn handle_build(args: &[String]) -> Result<(), String> {
     let mut output: Option<PathBuf> = None;
     let mut build_dir: Option<PathBuf> = None;
     let mut native = false;
+    let mut native_options = NativeOptions::default();
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -235,8 +243,22 @@ fn handle_build(args: &[String]) -> Result<(), String> {
             build_dir = Some(PathBuf::from(val));
         } else if arg == "--native" || arg == "-n" {
             native = true;
+        } else if arg == "--freestanding" {
+            native_options.freestanding = true;
+        } else if arg == "--object" {
+            native_options.object = true;
+        } else if arg == "--load-address" {
+            i += 1;
+            if i >= args.len() {
+                return Err("error: address is required after --load-address".to_string());
+            }
+            native_options.load_address = Some(parse_load_address(&args[i])?);
+        } else if let Some(val) = arg.strip_prefix("--load-address=") {
+            native_options.load_address = Some(parse_load_address(val)?);
         } else if arg == "-h" || arg == "--help" {
-            println!("usage: +a build <source.pa> [-o <output>] [--build-dir <dir>] [--native]");
+            println!(
+                "usage: +a build <source.pa> [-o <output>] [--build-dir <dir>] [--native] [--freestanding] [--object] [--load-address <addr>]"
+            );
             return Ok(());
         } else if arg.starts_with('-') {
             return Err(format!("error: unrecognized option '{arg}' for 'build'"));
@@ -244,6 +266,13 @@ fn handle_build(args: &[String]) -> Result<(), String> {
             return Err("error: only one source file is accepted for 'build'".to_string());
         }
         i += 1;
+    }
+    if (native_options.freestanding
+        || native_options.object
+        || native_options.load_address.is_some())
+        && !native
+    {
+        return Err("error: --freestanding/--object/--load-address require --native".to_string());
     }
     let source_path =
         source.ok_or_else(|| "error: source path is required for 'build'".to_string())?;
@@ -264,7 +293,6 @@ fn handle_build(args: &[String]) -> Result<(), String> {
         .unwrap_or("output");
 
     if native {
-        require_native_support(&image)?;
         let out_path = output.unwrap_or_else(|| bdir.join("native").join(stem));
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent).map_err(|err| {
@@ -274,8 +302,7 @@ fn handle_build(args: &[String]) -> Result<(), String> {
                 )
             })?;
         }
-        compile_executable(&image, &out_path)
-            .map_err(|err| format!("native compile error: {err}"))?;
+        compile_native_with_options(&image, &out_path, native_options)?;
         println!("built: {}", out_path.display());
     } else {
         let out_path = output.unwrap_or_else(|| bdir.join("bytecode").join(format!("{stem}.avm")));
@@ -434,6 +461,61 @@ fn require_native_support(image: &[u8]) -> Result<(), String> {
     ))
 }
 
+/// Native build options shared by `build --native` and `compile-native`.
+#[derive(Debug, Clone, Copy, Default)]
+struct NativeOptions {
+    freestanding: bool,
+    object: bool,
+    load_address: Option<u64>,
+}
+
+fn parse_load_address(text: &str) -> Result<u64, String> {
+    let (radix, digits) =
+        if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            (16, hex)
+        } else {
+            (10, text)
+        };
+    u64::from_str_radix(digits, radix).map_err(|_| {
+        format!("error: invalid load address '{text}': expected a hex (0x…) or decimal integer")
+    })
+}
+
+/// Compile `image` natively according to `options`, writing to `output`.
+///
+/// Hosted output links a normal executable; freestanding output links a
+/// static `_start` image (optionally at a load address); object output
+/// assembles a relocatable object without linking. The native-subset check
+/// runs first so an unsupported image never produces a partial artifact.
+fn compile_native_with_options(
+    image: &[u8],
+    output: &Path,
+    options: NativeOptions,
+) -> Result<(), String> {
+    if options.object && options.load_address.is_some() {
+        return Err(
+            "error: --load-address cannot be used with --object; set addresses when linking"
+                .to_string(),
+        );
+    }
+    require_native_support(image)?;
+    if options.object {
+        compile_object(image, output).map_err(|err| format!("native compile error: {err}"))?;
+    } else if options.freestanding {
+        compile_freestanding(image, output, options.load_address)
+            .map_err(|err| format!("native compile error: {err}"))?;
+    } else {
+        if options.load_address.is_some() {
+            return Err(
+                "error: --load-address requires --freestanding (a hosted executable chooses its own load address)"
+                    .to_string(),
+            );
+        }
+        compile_executable(image, output).map_err(|err| format!("native compile error: {err}"))?;
+    }
+    Ok(())
+}
+
 fn run_native_image(image: &[u8], build_dir: &Path, stem: &str) -> Result<(), String> {
     require_native_support(image)?;
     let native_path = build_dir.join("native").join(stem);
@@ -445,18 +527,19 @@ fn run_native_image(image: &[u8], build_dir: &Path, stem: &str) -> Result<(), St
             )
         })?;
     }
-    compile_executable(image, &native_path)
+    compile_executable_for_run(image, &native_path)
         .map_err(|err| format!("native compile error: {err}"))?;
     let status = std::process::Command::new(&native_path)
         .status()
         .map_err(|err| format!("failed to execute '{}': {err}", native_path.display()))?;
-    if status.code() == Some(crate::native::NATIVE_FAULT_EXIT) {
-        return Err("error: runtime fault: native executable reported a VM fault".to_string());
-    }
     if let Some(code) = status.code() {
         println!("stopped: {code}");
+        Ok(())
+    } else {
+        Err(format!(
+            "error: runtime fault: native executable terminated by {status}"
+        ))
     }
-    Ok(())
 }
 
 fn handle_verify(args: &[String]) -> Result<(), String> {
@@ -529,31 +612,54 @@ fn handle_run_jit(args: &[String]) -> Result<(), String> {
 }
 
 fn handle_compile_native(args: &[String]) -> Result<(), String> {
-    let mut arguments = args.iter();
-    let image_path = PathBuf::from(
-        arguments
-            .next()
-            .ok_or_else(|| format!("{}\nerror: image path is required", usage()))?,
-    );
-    let option = arguments
-        .next()
-        .ok_or_else(|| format!("{}\nerror: --output is required", usage()))?;
-    if option != "-o" && option != "--output" {
-        return Err(format!("{}\nerror: expected -o/--output", usage()));
+    let mut image_path: Option<PathBuf> = None;
+    let mut output_path: Option<PathBuf> = None;
+    let mut native_options = NativeOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-o" || arg == "--output" {
+            i += 1;
+            if i >= args.len() {
+                return Err("error: executable path is required after -o/--output".to_string());
+            }
+            output_path = Some(PathBuf::from(&args[i]));
+        } else if let Some(val) = arg.strip_prefix("--output=") {
+            output_path = Some(PathBuf::from(val));
+        } else if arg == "--freestanding" {
+            native_options.freestanding = true;
+        } else if arg == "--object" {
+            native_options.object = true;
+        } else if arg == "--load-address" {
+            i += 1;
+            if i >= args.len() {
+                return Err("error: address is required after --load-address".to_string());
+            }
+            native_options.load_address = Some(parse_load_address(&args[i])?);
+        } else if let Some(val) = arg.strip_prefix("--load-address=") {
+            native_options.load_address = Some(parse_load_address(val)?);
+        } else if arg == "-h" || arg == "--help" {
+            println!(
+                "usage: +a compile-native <image.avm> -o <path> [--freestanding] [--object] [--load-address <addr>]"
+            );
+            return Ok(());
+        } else if arg.starts_with('-') {
+            return Err(format!(
+                "error: unrecognized option '{arg}' for 'compile-native'"
+            ));
+        } else if image_path.replace(PathBuf::from(arg)).is_some() {
+            return Err("error: only one image file is accepted for 'compile-native'".to_string());
+        }
+        i += 1;
     }
-    let output_path = PathBuf::from(
-        arguments
-            .next()
-            .ok_or_else(|| format!("{}\nerror: executable path is required", usage()))?,
-    );
-    if arguments.next().is_some() {
-        return Err(format!("{}\nerror: unexpected extra argument", usage()));
-    }
+    let image_path =
+        image_path.ok_or_else(|| format!("{}\nerror: image path is required", usage()))?;
+    let output_path =
+        output_path.ok_or_else(|| format!("{}\nerror: --output is required", usage()))?;
     let image =
         fs::read(&image_path).map_err(|error| format!("{}: {}", image_path.display(), error))?;
     verify_image(&image).map_err(|error| format!("{}: {error}", image_path.display()))?;
-    require_native_support(&image)?;
-    compile_executable(&image, &output_path).map_err(|error| error.to_string())?;
+    compile_native_with_options(&image, &output_path, native_options)?;
     println!("built: {}", output_path.display());
     Ok(())
 }
@@ -614,6 +720,19 @@ fn handle_direct_or_legacy(args: &[String]) -> Result<(), String> {
             }
         }
         i += 1;
+    }
+
+    if jit && native {
+        return Err(
+            "error: '--jit' and '--native' select different execution modes and cannot be combined"
+                .to_string(),
+        );
+    }
+    if output.is_some() && (jit || native) {
+        return Err(
+            "error: -o selects bytecode-only output and cannot be combined with --jit/--native; use 'build' for native output"
+                .to_string(),
+        );
     }
 
     validate_source_extension(&source_path)?;
@@ -687,7 +806,7 @@ pub fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{}", error);
+            eprintln!("{error}");
             ExitCode::from(2)
         }
     }

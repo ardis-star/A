@@ -1,6 +1,6 @@
 # +A Memory Model
 
-**Edition:** ASCENSION +A Core V1.1.0
+**Edition:** ASCENSION +A Core V2.0.0
 
 ## 1. No implicit memory
 
@@ -111,12 +111,12 @@ a word load `.w`, a dword load `.d`, and a qword load `.q`.
 
 | Behaviour | Interpreter | JIT | AOT |
 |---|---|---|---|
-| Ordinary load/store | yes | **no** | **no** |
-| Atomic load/store | yes | **no** | **no** |
-| `compare.swap` | yes | yes | yes |
-| Unaligned ordinary access | allowed | n/a | n/a |
-| Fault on unmapped access | `MEMORY_ACCESS` | n/a | n/a |
+| Ordinary load/store | yes | unsafe library API only | yes |
+| Atomic load/store | yes | unsafe library API only | yes |
+| `compare.swap` | yes | unsafe library API only | yes |
+| Unaligned ordinary access | allowed | allowed (unsafe API) | allowed |
+| Fault on unmapped access | `MEMORY_ACCESS` | host signal (unsafe API) | host signal |
 
-AOT and JIT programs therefore cannot use memory today. That is a documented
-limitation of the native subset, not a semantic difference: no memory
-instruction is ever *silently* approximated.
+Native memory is **direct host memory**, not sandboxed: there are no region
+checks, and an invalid address crashes the process with a host signal rather
+than a VM fault. See [JIT-AOT.md](JIT-AOT.md) §1.1. Native access also lacks AVM permission, overflow, and alignment checks.

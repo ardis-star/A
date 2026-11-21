@@ -1,12 +1,12 @@
 # Building, Installing, and Testing +A
 
-**Edition:** ASCENSION +A Core V1.1.0
+**Edition:** ASCENSION +A Core V2.0.0
 
 ## 1. Requirements
 
 | Requirement | Version | Needed for |
 |---|---|---|
-| Rust | **1.87 or newer** (edition 2024 needs 1.85; the code uses `u64::is_multiple_of`, stable in 1.87). 1.97.0 is what V1.1.0 was built and tested with | building the toolchain |
+| Rust | **1.87 or newer** (edition 2024 needs 1.85; the code uses `u64::is_multiple_of`, stable in 1.87). V2 changes were also tested with the pinned 1.97.0 | building the toolchain |
 | `cc` (any C toolchain) | — | **only** the JIT and AOT backends; the interpreter does not need it |
 | Linux x86-64 | — | the JIT (uses `dlopen`) and the AOT backend (emits SysV x86-64 assembly) |
 
@@ -69,12 +69,11 @@ directly from a checkout:
 
 ```bash
 cd rust
-cargo test --locked --offline --lib --tests
+cargo test --locked --offline
 ```
 
-> Use `--lib --tests`, not a bare `cargo test`. The latter also builds
-> doc-tests, which requires `rustdoc`; some minimal toolchain distributions omit
-> it, and the failure then looks like a test failure.
+> Full release validation includes doc-tests and requires `rustdoc`. The
+> pinned toolchain validation is recorded in [V2-ACCEPTANCE.md](V2-ACCEPTANCE.md).
 
 The suite is organised as:
 
@@ -82,14 +81,15 @@ The suite is organised as:
 |---|---|
 | `tests/assembler.rs` | lexer, parser, encoder, golden images, CLI end-to-end |
 | `tests/avm.rs` | interpreter semantics, faults, memory, exceptions |
-| `tests/verifier.rs` | every verification rule and malformed-image case |
+| `tests/verifier.rs` | verification rules and malformed-image cases |
 | `tests/cli.rs` | command surface, exit statuses, diagnostics |
-| `tests/regressions.rs` | every bug fixed in V1.1.0, tier-equivalence, fuzzing, docs/code agreement |
+| `tests/compatibility.rs` | representative V1.1.0 bytecode fixtures |
+| `tests/regressions.rs` | every bug fixed in V1.1.0/V2.0.0, tier-equivalence, fuzzing, docs/code agreement |
 | `tests/golden/*.a` | exact-byte fixtures |
 
-V1.1.0 reports **161 passing tests, 1 ignored** across these targets (see
+V2.0.0 reports **182 passing tests, 1 ignored** across these targets (see
 [CHANGELOG.md](../CHANGELOG.md) for the exact per-target counts). The ignored
-test is a deliberate `#[ignore]` long-running case, not a failure.
+test requires a Python reference source tree absent from this checkout.
 
 ### 4.1 Formatting and lints
 
@@ -112,8 +112,9 @@ entirely on other platforms.
 | Platform | Interpreter / assembler / verifier | JIT | AOT |
 |---|---|---|---|
 | Linux x86-64 | yes | yes (needs `cc`) | yes (needs `cc`) |
-| Linux aarch64 | yes | no — `run_jit` returns an error explaining the limitation | no |
-| macOS / Windows | expected to build, not validated | no | no |
+| Linux aarch64 | not validated | no — `run_jit` returns an error explaining the limitation | no |
+| macOS | not validated | no | not validated |
+| Windows | not validated; crate currently uses Unix-specific APIs | no | not validated |
 
 The backend-dependent functions return a diagnosable error rather than being
 silently reinterpreted, so a program that asks for JIT on an unsupported
@@ -126,7 +127,7 @@ platform fails with
 |---|---|---|
 | `error: could not compile ... edition 2024` | Rust older than 1.85 | install 1.97.0 or newer |
 | `error: current MSRV ... stable since 1.87.0` | Rust older than 1.87 | install 1.97.0 or newer |
-| doc-test compilation errors | no `rustdoc` in the toolchain | use `--lib --tests` |
+| `rustdoc` not found | incomplete Rust installation | install the complete pinned toolchain |
 | `jit error: the current JIT requires…` | not Linux x86-64 | use the interpreter |
 | `failed to start cc` | no C toolchain | install `cc`, or avoid `--jit`/`--native` |
 | `error: this image cannot run natively` | image uses interpreter-only instructions | run without `--native`; see [JIT-AOT.md](JIT-AOT.md) |

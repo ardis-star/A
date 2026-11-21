@@ -1,6 +1,6 @@
 # +A Core Documentation
 
-**Edition:** ASCENSION +A Core V1.1.0
+**Edition:** ASCENSION +A Core V2.0.0
 
 Public, implementation-accurate documentation for the +A toolchain. Every
 document describes what the code in `rust/src` actually does. Where a claim can
@@ -25,14 +25,15 @@ document so a reader can run them.
 | [BYTECODE-FORMAT.md](BYTECODE-FORMAT.md) | The `.avm` container, byte for byte. |
 | [VERIFICATION.md](VERIFICATION.md) | Every verification rule, in the order they run, with the exact messages. |
 | [AVM.md](AVM.md) | The interpreter: initial state, faults, steps, resumption, exceptions. |
-| [JIT-AOT.md](JIT-AOT.md) | The native tiers: the 36-instruction subset, the ABI, fault publication, limits. |
+| [JIT-AOT.md](JIT-AOT.md) | The native tiers: the 51-instruction subset, the ABI, fault publication, freestanding output, limits. |
 
 ## Design and status
 
 | Document | Read it for |
 |---|---|
 | [SYS-ARCHITECTURE.md](SYS-ARCHITECTURE.md) | Design (not implementation) of the `sys.*` capability boundary. |
-| [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | The honest list of what V1.1.0 cannot do. |
+| [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | The honest list of what V2.0.0 cannot do. |
+| [V2-ACCEPTANCE.md](V2-ACCEPTANCE.md) | Reproducible release requirements and results. |
 
 ## Reading order for a new contributor
 
@@ -51,7 +52,7 @@ document so a reader can run them.
   disagree, the code is authoritative and the prose is a bug.
 * “Interpreter-only” means the JIT and AOT backends refuse the instruction with a
   named error; it never means “quietly interpreted”.
-* Counts (97 instructions, 36 native, 161 tests) are from the V1.1.0 tree and are
+* Counts (97 instructions, 51 native, 182 tests) are from the V2.0.0 tree and are
   re-derived by tests where possible.
 
 ## Keeping these documents true
@@ -66,5 +67,5 @@ document so a reader can run them.
 | Every `sys.*` service is gated | `every_system_service_requires_a_capability` |
 
 All of these live in `rust/tests/` and run with
-`cargo test --lib --tests`. If you change behaviour, change the document and the
+`cargo test`. If you change behaviour, change the document and the
 test in the same commit.

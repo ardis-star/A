@@ -166,7 +166,7 @@ fn encode_operand(
         Operand::LabelRef(LabelRef { name }) => {
             let block = blocks
                 .get(name)
-                .ok_or_else(|| EncodeError(format!("undefined label {:?}", name)))?;
+                .ok_or_else(|| EncodeError(format!("undefined label {name:?}")))?;
             output.push(4);
             output.extend(uleb(u64::from(*block)));
         }
@@ -182,7 +182,7 @@ fn encode_operand(
         Operand::Symbol(name) => {
             let index = symbols
                 .get(name)
-                .ok_or_else(|| EncodeError(format!("undefined symbol {:?}", name)))?;
+                .ok_or_else(|| EncodeError(format!("undefined symbol {name:?}")))?;
             output.push(6);
             output.extend(uleb(u64::from(*index)));
         }
@@ -264,8 +264,7 @@ fn sections(program: &Program) -> Result<(Vec<EncodedSection>, bool), EncodeErro
     for exported in &program.exports {
         if !program.labels.contains_key(exported) {
             return Err(EncodeError(format!(
-                "exported symbol {:?} is not a label",
-                exported
+                "exported symbol {exported:?} is not a label"
             )));
         }
     }
@@ -362,7 +361,7 @@ fn sections(program: &Program) -> Result<(Vec<EncodedSection>, bool), EncodeErro
             .any(|operand| matches!(operand, Operand::LabelRef(_)))
     });
     let mut sections = vec![
-        (SECTION_META, 0, b"+A assembler 0.1\0".to_vec()),
+        (SECTION_META, 0, b"+A assembler 2.0.0\0".to_vec()),
         (SECTION_DATA, 0, Vec::new()),
         (SECTION_CODE, 0, code_section),
         (SECTION_SYMS, 0, symbols),

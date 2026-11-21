@@ -1,7 +1,7 @@
-# `sys.*` Architecture — Design for V1.1.0
+# `sys.*` Architecture — Design for V2.0.0
 
 **Status:** design only. **Nothing in this document is implemented.**
-**Edition:** ASCENSION +A Core V1.1.0
+**Edition:** ASCENSION +A Core V2.0.0
 
 Task scope: design a safe system-service architecture — capabilities, a
 privilege boundary, and runtime services — so that "+A Foundation" can be built

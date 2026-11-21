@@ -1,6 +1,6 @@
 # +A Register Architecture
 
-**Edition:** ASCENSION +A Core V1.1.0
+**Edition:** ASCENSION +A Core V2.0.0
 
 ## 1. Machine state
 
@@ -101,7 +101,7 @@ identical flag values (see [JIT-AOT.md](JIT-AOT.md)).
 The interpreter, the JIT, and AOT code all compute Z, S, C, O and P from the
 same rules. The differential tests in `rust/tests/regressions.rs`
 (`execution_tiers_agree_on_a_representative_matrix`) compare flag-visible
-outcomes across tiers. Only the 36 instructions listed as native in
+outcomes across tiers. Only the 51 instructions listed as native in
 [INSTRUCTION-REFERENCE.md](INSTRUCTION-REFERENCE.md) can be compared this way;
 the rest are interpreter-only and reported as such.
 
@@ -109,7 +109,7 @@ the rest are interpreter-only and reported as such.
 
 Registers are machine state and persist across `call`, `return`, `raise`, and
 `catch`. There is **no** automatic save/restore: a callee overwrites whatever it
-touches. V1 specifies no calling convention beyond "arguments and results go in
+touches. Core specifies no calling convention beyond "arguments and results go in
 registers chosen by the author", because +A has one function in the emitted
 image and no parameter mechanism. A stack-based convention is a *convention*
 that a higher layer (Foundation) must define; it is not part of Core.

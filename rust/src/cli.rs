@@ -7,14 +7,14 @@ use std::process::ExitCode;
 
 use crate::assemble;
 use crate::avm::{Avm, RunResult};
-use crate::jit::run_jit;
-use crate::native::compile_executable;
+use crate::jit::run_jit64;
+use crate::native::{compile_executable, unsupported_instructions};
 use crate::verifier::{decode_image, verify_image};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn usage() -> &'static str {
-    "usage: +a <source.pa> | +a run <source.pa|image.avm> | +a build <source.pa> [-o <output>] | +a check <source.pa> | +a --help | +a --version"
+    "usage: +a <source.pa> | +a run <source.pa|image.avm> | +a build <source.pa> [-o <output>] | +a check <source.pa> | +a verify <image.avm> | +a inspect <image.avm> | +a run-jit <image.avm> | +a compile-native <image.avm> -o <path> | +a --help | +a --version"
 }
 
 pub fn help_text() -> &'static str {
@@ -264,6 +264,7 @@ fn handle_build(args: &[String]) -> Result<(), String> {
         .unwrap_or("output");
 
     if native {
+        require_native_support(&image)?;
         let out_path = output.unwrap_or_else(|| bdir.join("native").join(stem));
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent).map_err(|err| {
@@ -331,6 +332,12 @@ fn handle_run(args: &[String]) -> Result<(), String> {
     }
     let target_path =
         target.ok_or_else(|| "error: target path is required for 'run'".to_string())?;
+    if jit && native {
+        return Err(
+            "error: '--jit' and '--native' select different execution modes and cannot be combined"
+                .to_string(),
+        );
+    }
     let target_kind = validate_run_target(&target_path)?;
 
     match target_kind {
@@ -365,30 +372,11 @@ fn handle_run(args: &[String]) -> Result<(), String> {
             })?;
 
             if jit {
-                let result = run_jit(&image).map_err(|err| format!("jit error: {err}"))?;
-                println!("jit returned: {result}");
+                let result = run_jit64(&image).map_err(|err| format!("jit error: {err}"))?;
+                println!("jit stopped: {result}");
                 Ok(())
             } else if native {
-                let native_path = bdir.join("native").join(stem);
-                if let Some(parent) = native_path.parent() {
-                    fs::create_dir_all(parent).map_err(|err| {
-                        format!(
-                            "error: failed to create build directory '{}': {err}",
-                            parent.display()
-                        )
-                    })?;
-                }
-                compile_executable(&image, &native_path)
-                    .map_err(|err| format!("native compile error: {err}"))?;
-                let status = std::process::Command::new(&native_path)
-                    .status()
-                    .map_err(|err| {
-                        format!("failed to execute '{}': {err}", native_path.display())
-                    })?;
-                if let Some(code) = status.code() {
-                    println!("stopped: {code}");
-                }
-                Ok(())
+                run_native_image(&image, bdir, stem)
             } else {
                 execute_avm(&image)
             }
@@ -396,10 +384,20 @@ fn handle_run(args: &[String]) -> Result<(), String> {
         TargetKind::Bytecode => {
             let image = fs::read(&target_path)
                 .map_err(|err| format!("error: cannot read '{}': {err}", target_path.display()))?;
+            let default_build = PathBuf::from("build");
+            let bdir = build_dir.as_ref().unwrap_or(&default_build);
+            let stem = target_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
             if jit {
-                let result = run_jit(&image).map_err(|err| format!("jit error: {err}"))?;
-                println!("jit returned: {result}");
+                let result = run_jit64(&image).map_err(|err| format!("jit error: {err}"))?;
+                println!("jit stopped: {result}");
                 Ok(())
+            } else if native {
+                // `--native` used to be accepted and silently ignored for
+                // bytecode input; it now compiles and runs the image natively.
+                run_native_image(&image, bdir, stem)
             } else {
                 let mut machine = Avm::load(&image).map_err(|err| err.to_string())?;
                 match machine
@@ -413,6 +411,52 @@ fn handle_run(args: &[String]) -> Result<(), String> {
             }
         }
     }
+}
+
+/// Compile `image` to a native executable under `<build_dir>/native/` and run
+/// it, reporting a VM fault (as opposed to a `stop` status) as an error.
+/// Refuse a native run/build up front when the image uses instructions the
+/// backends cannot lower.
+///
+/// Without this the failure surfaced as an `cc` diagnostic about generated
+/// assembly. The check makes the limitation a first-class, named error and
+/// guarantees no execution tier is entered silently. There is deliberately no
+/// fallback to the interpreter: the caller asked for native execution.
+fn require_native_support(image: &[u8]) -> Result<(), String> {
+    let missing = unsupported_instructions(image).map_err(|error| error.to_string())?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "error: this image cannot run natively; it uses {} instruction(s) outside the native subset: {}\n       run it without --native (interpreter) or see manual/JIT-AOT.md",
+        missing.len(),
+        missing.join(", ")
+    ))
+}
+
+fn run_native_image(image: &[u8], build_dir: &Path, stem: &str) -> Result<(), String> {
+    require_native_support(image)?;
+    let native_path = build_dir.join("native").join(stem);
+    if let Some(parent) = native_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "error: failed to create build directory '{}': {err}",
+                parent.display()
+            )
+        })?;
+    }
+    compile_executable(image, &native_path)
+        .map_err(|err| format!("native compile error: {err}"))?;
+    let status = std::process::Command::new(&native_path)
+        .status()
+        .map_err(|err| format!("failed to execute '{}': {err}", native_path.display()))?;
+    if status.code() == Some(crate::native::NATIVE_FAULT_EXIT) {
+        return Err("error: runtime fault: native executable reported a VM fault".to_string());
+    }
+    if let Some(code) = status.code() {
+        println!("stopped: {code}");
+    }
+    Ok(())
 }
 
 fn handle_verify(args: &[String]) -> Result<(), String> {
@@ -479,8 +523,8 @@ fn handle_run_jit(args: &[String]) -> Result<(), String> {
     }
     let image =
         fs::read(&image_path).map_err(|error| format!("{}: {}", image_path.display(), error))?;
-    let result = run_jit(&image).map_err(|error| error.to_string())?;
-    println!("jit returned: {result}");
+    let result = run_jit64(&image).map_err(|error| error.to_string())?;
+    println!("jit stopped: {result}");
     Ok(())
 }
 
@@ -507,7 +551,11 @@ fn handle_compile_native(args: &[String]) -> Result<(), String> {
     }
     let image =
         fs::read(&image_path).map_err(|error| format!("{}: {}", image_path.display(), error))?;
-    compile_executable(&image, &output_path).map_err(|error| error.to_string())
+    verify_image(&image).map_err(|error| format!("{}: {error}", image_path.display()))?;
+    require_native_support(&image)?;
+    compile_executable(&image, &output_path).map_err(|error| error.to_string())?;
+    println!("built: {}", output_path.display());
+    Ok(())
 }
 
 fn handle_direct_or_legacy(args: &[String]) -> Result<(), String> {
@@ -575,7 +623,11 @@ fn handle_direct_or_legacy(args: &[String]) -> Result<(), String> {
         .replace("\r\n", "\n");
     let image = assemble(&text).map_err(|error| format_assembly_error(&source_path, &error))?;
 
-    // If explicit output was specified, this is legacy assembly mode: aa <source> -o <output>
+    // Every path produces a verifiable image, including partial builds.
+    verify_image(&image)
+        .map_err(|error| format!("{}: verification failed: {error}", source_path.display()))?;
+
+    // `-o` selects bytecode-only output, matching `build`.
     if let Some(out_path) = output {
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent).map_err(|err| {
@@ -585,13 +637,13 @@ fn handle_direct_or_legacy(args: &[String]) -> Result<(), String> {
                 )
             })?;
         }
-        return fs::write(&out_path, &image)
-            .map_err(|error| format!("{}: {}", out_path.display(), error));
+        fs::write(&out_path, &image)
+            .map_err(|error| format!("{}: {}", out_path.display(), error))?;
+        println!("built: {}", out_path.display());
+        return Ok(());
     }
 
     // Direct execution: +a program.pa
-    verify_image(&image)
-        .map_err(|error| format!("{}: verification failed: {error}", source_path.display()))?;
 
     // Store generated bytecode in build directory
     let default_build = PathBuf::from("build");
@@ -617,28 +669,11 @@ fn handle_direct_or_legacy(args: &[String]) -> Result<(), String> {
     })?;
 
     if jit {
-        let result = run_jit(&image).map_err(|err| format!("jit error: {err}"))?;
-        println!("jit returned: {result}");
+        let result = run_jit64(&image).map_err(|err| format!("jit error: {err}"))?;
+        println!("jit stopped: {result}");
         Ok(())
     } else if native {
-        let native_path = bdir.join("native").join(stem);
-        if let Some(parent) = native_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!(
-                    "error: failed to create build directory '{}': {err}",
-                    parent.display()
-                )
-            })?;
-        }
-        compile_executable(&image, &native_path)
-            .map_err(|err| format!("native compile error: {err}"))?;
-        let status = std::process::Command::new(&native_path)
-            .status()
-            .map_err(|err| format!("failed to execute '{}': {err}", native_path.display()))?;
-        if let Some(code) = status.code() {
-            println!("stopped: {code}");
-        }
-        Ok(())
+        run_native_image(&image, bdir, stem)
     } else {
         execute_avm(&image)
     }

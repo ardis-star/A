@@ -96,6 +96,8 @@ pub struct Avm {
     pub privileged: bool,
     pub capabilities: u32,
     pub functions: Vec<VerifiedFunction>,
+    /// Exported symbols, in SYMS order; `address` operands index this list.
+    pub symbols: Vec<crate::verifier::Symbol>,
     pub code_base: usize,
     current_function_id: u32,
     call_stack: Vec<(u32, usize)>,
@@ -122,6 +124,7 @@ impl Avm {
             privileged: false,
             capabilities: 0,
             functions: decoded.functions.clone(),
+            symbols: decoded.symbols.clone(),
             code_base,
             current_function_id: entry,
             call_stack: Vec::new(),
@@ -148,6 +151,7 @@ impl Avm {
             privileged: false,
             capabilities: 0,
             functions: decoded.functions.clone(),
+            symbols: decoded.symbols.clone(),
             code_base,
             current_function_id: entry,
             call_stack: Vec::new(),
@@ -205,6 +209,13 @@ impl Avm {
             .find(|f| f.id == self.current_function_id)
     }
 
+    /// Execute until the program returns, stops, or faults.
+    ///
+    /// The step budget is consumed by every instruction, including one that
+    /// branches or calls. When the budget runs out the machine is left in a
+    /// restartable state: the [program counter](Self::pc) points at the next
+    /// instruction that would have executed (inside the function the last
+    /// instruction transferred to), so a caller may resume with another `run`.
     pub fn run(&mut self) -> Result<RunResult, AvmError> {
         for _ in 0..self.step_limit {
             let function = self.current_function().ok_or(AvmError::MissingEntry)?;
@@ -213,11 +224,13 @@ impl Avm {
             }
             let instruction_pc = self.pc;
             let instruction = function.instructions[instruction_pc].clone();
-            self.pc += 1;
+            self.pc = instruction_pc + 1;
             match self.execute(&instruction) {
                 Ok(Some(result)) => return Ok(result),
                 Ok(None) => {}
                 Err(error) => {
+                    // A fault must not commit its effects: point the machine
+                    // back at the faulting instruction.
                     self.pc = instruction_pc;
                     return Err(error);
                 }
@@ -226,6 +239,11 @@ impl Avm {
         Err(AvmError::StepLimit)
     }
 
+    /// Execute one instruction.
+    ///
+    /// The program counter has already been advanced past the instruction; an
+    /// instruction that transfers control overwrites it with its target. The
+    /// caller restores the counter if execution faults.
     fn execute(
         &mut self,
         instruction: &VerifiedInstruction,
@@ -260,8 +278,7 @@ impl Avm {
                     _ => self.registers[0],
                 };
                 self.registers[0] = code;
-                let (_, target) = self.handler_stack.pop().ok_or(AvmError::InvalidHandler)?;
-                self.pc = target;
+                self.pc = self.take_handler()?;
                 Ok(None)
             }
             0x000A => {
@@ -446,8 +463,10 @@ impl Avm {
             let l = signed_value(left, bits);
             let r = signed_value(right, bits);
             let min = -(1_i128 << (bits - 1));
+            // The only quotient that is not representable at this width; the
+            // architecture reports it as an integer overflow, not a divide fault.
             if l == min && r == -1 {
-                return Err(AvmError::DivByZero);
+                return Err(AvmError::IntegerOverflow);
             }
             let q = (l / r) as u64 & mask;
             let m = (l % r) as u64 & mask;
@@ -527,6 +546,37 @@ impl Avm {
         Err(AvmError::UnsupportedService)
     }
 
+    /// Pop the innermost handler recorded *by the running function* and return
+    /// its instruction index.
+    ///
+    /// Handlers are function-scoped: a `catch` in one function must never
+    /// redirect a `raise` that happens in another, because block IDs are only
+    /// meaningful inside the function that defines them. Handlers registered by
+    /// an outer function are discarded by the unwind that the `raise` performs,
+    /// so they are popped here rather than left to redirect a later `raise` to a
+    /// stale block in the wrong function.
+    fn take_handler(&mut self) -> Result<usize, AvmError> {
+        let function = self.current_function_id;
+        let mut found = None;
+        while let Some((owner, target)) = self.handler_stack.pop() {
+            if owner == function {
+                found = Some(target);
+                break;
+            }
+            // A handler registered by a callee that has already returned can no
+            // longer be reached; discard it and keep unwinding.
+            if self
+                .call_stack
+                .iter()
+                .any(|(frame_function, _)| *frame_function == owner)
+            {
+                self.handler_stack.push((owner, target));
+                break;
+            }
+        }
+        found.ok_or(AvmError::InvalidHandler)
+    }
+
     fn block_target(&self, instruction: &VerifiedInstruction) -> Result<usize, AvmError> {
         let Some(VerifiedOperand::Block(block_id)) = instruction.operands.first() else {
             return Err(AvmError::InvalidOperand("expected block target"));
@@ -539,14 +589,28 @@ impl Avm {
             .ok_or(AvmError::InvalidOperand("unmapped block target"))
     }
 
+    /// Resolve a symbol operand to a VM address.
+    ///
+    /// `Symbol(n)` indexes the image's SYMS section, not the function table, so
+    /// the name is resolved through that section to the function it names and
+    /// then to that function's address in the VM's code space. Programs must
+    /// therefore only rely on the *identity* of the returned address; it is not
+    /// a host pointer and has no meaning outside the VM.
     fn resolve_symbol_address(&self, symbol_index: u32) -> Result<usize, AvmError> {
-        let function =
-            self.functions
-                .get(symbol_index as usize)
-                .ok_or(AvmError::InvalidOperand(
-                    "symbol index outside function table",
-                ))?;
-        Ok(function.code_offset)
+        let symbol = self
+            .symbols
+            .get(symbol_index as usize)
+            .ok_or(AvmError::InvalidOperand(
+                "symbol index outside SYMS section",
+            ))?;
+        let function = self
+            .functions
+            .iter()
+            .find(|function| function.id == symbol.function)
+            .ok_or(AvmError::InvalidOperand(
+                "symbol names a function outside the table",
+            ))?;
+        Ok(self.code_base + function.code_offset)
     }
 
     fn predicate(&self, predicate: Predicate) -> bool {

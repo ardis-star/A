@@ -1,8 +1,28 @@
+# Build configuration for the ASCENSION +A toolchain.
+#
+# Reproducibility notes
+# ---------------------
+# * The crate has no dependencies, so a build never resolves anything from a
+#   registry; `cargo build --locked --offline` is always sufficient.
+# * `rust-toolchain.toml` pins the compiler version that produced the current
+#   golden bytecode tests.
+# * Bytecode output is deterministic: assembling the same source twice produces
+#   byte-identical images (see `repeated_assembly_is_byte_for_byte_identical`).
+# * Native/JIT output is *not* bit-reproducible: it is assembled and linked by
+#   the host `cc`, whose version and flags are outside this crate's control.
+#   The *behaviour* is checked against the interpreter instead.
+
+[workspace]
+members = []
+
 [package]
 name = "ascension-assembler"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
-description = "ASCENSION +A V1.0 language toolchain"
+# The code uses `u64::is_multiple_of` (stable in 1.87) and edition 2024
+# (minimum 1.85), so 1.87 is the true floor.
+rust-version = "1.87"
+description = "ASCENSION +A Core V1.1.0 language toolchain"
 default-run = "plus-a"
 
 [lib]
@@ -17,4 +37,14 @@ path = "src/main.rs"
 name = "aa"
 path = "src/bin/aa.rs"
 
+# Freeze the toolchain's own dependency graph. There are no third-party
+# dependencies; this section documents the intent so a future change that adds
+# one is a deliberate, reviewable edit.
 [dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

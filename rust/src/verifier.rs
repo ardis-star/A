@@ -83,11 +83,19 @@ pub struct VerifiedFunction {
     pub blocks: BTreeMap<u64, usize>,
 }
 
+/// One entry of the SYMS section: an exported name bound to a function slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    pub function: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedImage {
     pub minor_version: u16,
     pub entry_function: Option<u32>,
     pub functions: Vec<VerifiedFunction>,
+    pub symbols: Vec<Symbol>,
     pub sections: BTreeMap<u32, Vec<u8>>,
     pub unresolved_control_targets: Vec<u64>,
 }
@@ -635,9 +643,10 @@ pub fn decode_image(image: &[u8]) -> Result<DecodedImage, VerifyError> {
     if function_count == 0 && entry_function.is_some() {
         return Err(fail("empty CODE section cannot have an entry function"));
     }
-    if let Some(symbols) = sections.get(&SECTION_SYMS) {
-        validate_symbols(symbols.data, function_count)?;
-    }
+    let symbols = match sections.get(&SECTION_SYMS) {
+        Some(section) => validate_symbols(section.data, function_count)?,
+        None => Vec::new(),
+    };
     let block_records = if let Some(block_section) = sections.get(&SECTION_BLOCKS) {
         parse_block_map(block_section.data)?
     } else {
@@ -753,6 +762,7 @@ pub fn decode_image(image: &[u8]) -> Result<DecodedImage, VerifyError> {
         minor_version,
         entry_function,
         functions,
+        symbols,
         sections: sections
             .into_iter()
             .map(|(kind, section)| (kind, section.data.to_vec()))
@@ -806,13 +816,14 @@ fn parse_block_map(bytes: &[u8]) -> Result<Vec<(u32, u32, u64)>, VerifyError> {
     Ok(records)
 }
 
-fn validate_symbols(bytes: &[u8], function_count: usize) -> Result<(), VerifyError> {
+fn validate_symbols(bytes: &[u8], function_count: usize) -> Result<Vec<Symbol>, VerifyError> {
     if bytes.len() < 4 {
         return Err(fail("truncated SYMS section"));
     }
     let count = read_u32(bytes, 0)? as usize;
     let mut position = 4usize;
     let mut names = BTreeSet::new();
+    let mut symbols = Vec::with_capacity(count);
     for _ in 0..count {
         let length = usize::from(read_u16(bytes, position)?);
         position = position
@@ -838,11 +849,17 @@ fn validate_symbols(bytes: &[u8], function_count: usize) -> Result<(), VerifyErr
         if function_id >= function_count {
             return Err(fail("symbol function ID is outside function table"));
         }
+        let name =
+            String::from_utf8(name.to_vec()).map_err(|_| fail("symbol name must be ASCII"))?;
+        symbols.push(Symbol {
+            name,
+            function: function_id as u32,
+        });
     }
     if position != bytes.len() {
         return Err(fail("trailing bytes in SYMS section"));
     }
-    Ok(())
+    Ok(symbols)
 }
 
 fn validate_excp_section(
@@ -979,7 +996,7 @@ fn validate_capabilities(
                     .ok_or_else(|| fail("CAPS section size overflow"))?,
             )
             .ok_or_else(|| fail("CAPS section size overflow"))?;
-        if expected > data.len() {
+        if expected != data.len() {
             return Err(fail("CAPS section length does not match record count"));
         }
         for index in 0..count {

@@ -2,6 +2,155 @@
 
 All notable changes to the ASCENSION +A toolchain will be documented in this file.
 
+## [1.1.0] - 2026-11-21
+
+**+A Core V1.1.0 — correctness release.** Every defect found in the V1.0.0 audit
+is fixed, and each one has a permanent regression test. No public API was
+removed; the changes below are documented in "Changed behaviour" where a program
+could observe a difference.
+
+### Fixed — bugs reproduced, confirmed, and repaired
+
+1. **`native.rs emit_compare_swap` ignored the memory offset.** The atomic
+   compare-and-swap lowered to `cmpxchg` against the base register only, so any
+   non-zero displacement addressed the wrong word. It now folds the displacement
+   into the effective address and uses the correct 32/64-bit `cmpxchg` form.
+   *Tests:* `compare_swap_honours_memory_offset`,
+   `compare_swap_offset_selects_the_right_word`.
+2. **`.d` narrow register writes ignored their source value.** `write_register`
+   with view `.d` always staged `%eax`/`%rax` instead of the `source` argument it
+   was given. The visible consequence is `div`, whose remainder is staged in
+   `%rdx`: both destinations received the quotient and the remainder was silently
+   lost. `.d` writes now store the value actually supplied, replace the whole slot
+   (zero-extended), and `.b`/`.w` still preserve the upper bits. *Tests:*
+   `dword_destination_stores_its_own_value`, `every_register_view_lowers_natively`.
+3. **`emit_div` divided with a bare `div`/`idiv` regardless of width.** The
+   emitter wrote `div %rcx` / `idiv %rcx` with no size suffix, so the divisor
+   width did not match the operand setup and narrow signed division produced a
+   different quotient *and* remainder from the interpreter. The backend now
+   sign-extends narrow signed operands from their own width, divides with the
+   full 64-bit `idivq`/`divq`, and masks both results to the operation width —
+   which is exactly the interpreter's rule. *Test:*
+   `narrow_signed_division_matches_the_interpreter`.
+4. **`+a run image.avm --native` silently ignored `--native`.** The bytecode path
+   executed in the interpreter regardless of the flag. All three `--native`
+   entry points (source, bytecode-via-`run`, and direct) now route through one
+   helper that compiles and runs natively. *Test:*
+   `run_bytecode_with_native_flag_builds_native_binary`.
+5. **`usage()` omitted implemented commands.** `run-jit`, `compile-native`,
+   `verify`, and `inspect` were missing from the usage banner. The banner is now
+   complete, and a test parses the command table and asserts the banner lists
+   every dispatched command. *Test:* `usage_lists_every_implemented_command`.
+6. **`validate_capabilities` accepted trailing bytes.** The `CAPS` length check
+   was `expected > data.len()`; an image could append arbitrary data after the
+   capability records and still verify. It is now an equality check.
+   *Test:* `caps_section_with_trailing_bytes_is_rejected`.
+7. **`raise` mishandled handlers across function boundaries.** `raise` popped the
+   innermost handler regardless of which function registered it, so a `raise` in
+   one function could jump to a handler in another. Handler lookup is now
+   function-scoped, dead frames' handlers are discarded during unwinding, and a
+   `raise` with no local handler faults with `INVALID_HANDLER`. *Tests:*
+   `raise_only_targets_a_handler_in_the_raising_function`,
+   `raise_without_a_local_handler_faults`.
+
+### Fixed — defects found during the audit (not in the original report)
+
+8. **`call`/`return` could only model a single return point.** The native backend
+   stored one return address in a frame slot, so any function containing a
+   `return` before its last instruction looped forever: the second call reused
+   the stale slot. The backend now uses the machine stack (`callq`/`retq`) with a
+   sentinel return address pushed at entry, so nesting and multiple returns
+   behave like the interpreter. *Test:*
+   `execution_tiers_agree_on_calls_and_branches`.
+9. **`division overflow` was reported as a divide fault.** `div.s` of the most
+   negative value by `-1` reported `DIVIDE_BY_ZERO`. It is an overflow, and now
+   reports `INTEGER_OVERFLOW` in the interpreter and as a distinct native fault.
+   *Tests:* `signed_division_overflow_is_not_a_divide_fault`,
+   `native_division_by_zero_reports_a_fault`.
+10. **`address` disagreed between tiers.** The interpreter resolved a symbol
+    index against the *function table*; the native tiers could not lower it at
+    all and failed with a generic message. `address` now resolves through the
+    image's `SYMS` section to a **VM address**, and the native backends reject it
+    with an explicit, named error. *Test:* `avm_address`.
+11. **Native faults were unreachable from the JIT.** Generated code detected a
+    division by zero but had no way to report it. Faults now publish a code
+    through an exported `ascension_fault_code` word (via the GOT), return
+    `NATIVE_FAULT_EXIT` (70), and the JIT and CLI translate that into an error
+    instead of a bogus status. *Test:* `native_division_by_zero_reports_a_fault`.
+
+### Added
+
+- **Honest native-subset reporting.** `NATIVE_OPCODE_RANGES` is the single
+  declared source of truth for what the native tiers can lower (36 of 97
+  instructions). `unsupported_instructions(image)` lists what an image needs that
+  the native tiers cannot provide, and `--native`/`--jit`/`compile-native` refuse
+  such an image **by name** with exit status 2, pointing at
+  `manual/JIT-AOT.md`. No tier silently falls back to another.
+  *Tests:* `native_opcode_table_matches_the_emitter`,
+  `native_refusal_names_the_unsupported_instruction`,
+  `cli_refuses_native_runs_that_need_the_interpreter`.
+- **`run_jit64`** returns the full 64-bit `stop` status; `run_jit` remains as a
+  compatibility wrapper returning the low 32 bits. `+a run --jit` and
+  `run-jit` print `jit stopped: <status>`. *Test:* `jit_reports_the_full_stop_status`.
+- **`instructions::mnemonic_for(opcode)`**, so diagnostics can name an
+  instruction they refuse; `definition_by_opcode` now derives from it, removing
+  a duplicated table.
+- **`verifier::Symbol` and `DecodedImage::symbols`**: the `SYMS` section is now
+  exposed as a typed, decoded list instead of being validated and discarded.
+  `Avm::symbols` and `Avm::code_base` accompany it.
+- **`rust-toolchain.toml`** pinning Rust 1.97.0 (plus `rustfmt`, `clippy`) for
+  reproducible diagnostics, and a documented release profile (`lto`, `strip`).
+- **Public documentation** in `manual/`: language specification, instruction
+  reference, register architecture, flags, memory model, bytecode format,
+  verification rules, AVM architecture, JIT/AOT limitations, CLI reference,
+  build/install, `sys.*` design, and known limitations. Three of these are
+  machine-checked against the code.
+- **`sys.*` architecture design** (`manual/SYS-ARCHITECTURE.md`): capabilities,
+  the privilege predicate, the service surface, and the migration path to
+  Foundation. Design only — nothing is implemented.
+
+### Changed behaviour (observable; documented, not silent)
+
+| Change | Affects | Rationale |
+|---|---|---|
+| `div.s MIN / -1` reports `INTEGER_OVERFLOW` instead of `DIVIDE_BY_ZERO` | programs that divide `INT64_MIN` by `-1` | it is an overflow; the old code was a misclassification |
+| `address` yields a **VM address** and resolves through `SYMS` | programs using `address` | the previous result was an in-image offset that native code could not produce |
+| `raise` cannot reach a handler in another function | programs that relied on cross-function `raise` | cross-function handlers are unsound: block IDs are function-local |
+| `+a run x.avm --native` now actually runs natively | bytecode workflows | the flag was previously ignored |
+| Native runs of interpreter-only images now fail instead of silently interpreting | native workflows | honesty: a requested tier must run or report |
+| `+a <src> -o <out>` verifies before writing and prints `built: <path>` | scripted builds | previously wrote unverified bytecode silently |
+| `+a compile-native` verifies and checks the subset before invoking `cc` | native builds | no partial artifacts from bad input |
+| `--jit --native` together is an error | CLI users | the modes are mutually exclusive |
+| `cargo` MSRV raised to 1.87 | builders | the code uses `u64::is_multiple_of` |
+
+### Test results (executed, V1.1.0)
+
+```
+cargo test --locked --offline --lib --tests
+tests/assembler.rs   72 passed, 1 ignored
+tests/avm.rs         36 passed
+tests/cli.rs          9 passed
+tests/regressions.rs 28 passed
+tests/verifier.rs    16 passed
+                     ────────────────────
+                    161 passed, 1 ignored, 0 failed
+```
+
+`cargo fmt -- --check` is clean. `cargo clippy --locked --offline --all-targets
+--all-features -- -D warnings` is clean. Doc-tests were **not** run: the build
+toolchain in use does not include `rustdoc`. This is stated rather than glossed
+over.
+
+### Compatibility
+
+- **Bytecode format**: unchanged. Format is still `A+BC` 1.0, and V1.1.0 emits
+  and accepts exactly what V1.0.0 did. Images produced by V1.0.0 still verify and
+  run.
+- **Rust API**: additive only. `run_jit` retains its signature and meaning.
+- **CLI**: additive, except that contradictory or unsupported requests now fail
+  instead of being ignored (see "Changed behaviour").
+- **Release tag**: `v1.0.0` is untouched.
+
 ## [1.0.0] - 2026-11-21
 
 ### Added

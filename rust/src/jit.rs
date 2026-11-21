@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use crate::native::emit_assembly;
+use crate::native::{FAULT_DIVIDE_BY_ZERO, FAULT_SYMBOL, emit_assembly};
 
 const RTLD_NOW: c_int = 2;
 const RTLD_LOCAL: c_int = 0;
@@ -17,6 +17,18 @@ unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dlclose(handle: *mut c_void) -> c_int;
     fn dlerror() -> *const c_char;
+}
+
+/// Translate a recorded native fault code into the matching AVM fault text, so
+/// JIT and interpreter report the same condition with the same wording.
+fn jit_fault(code: i32) -> JitError {
+    let avm = match code {
+        FAULT_DIVIDE_BY_ZERO => crate::avm::AvmError::DivByZero,
+        other => {
+            return JitError(format!("generated code reported unknown fault {other}"));
+        }
+    };
+    JitError(format!("{avm}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,8 +136,13 @@ fn compile_shared(assembly: &str, path: &std::path::Path) -> Result<(), JitError
     Ok(())
 }
 
+/// Run `image` through the JIT and return its 64-bit `stop` status.
+///
+/// The value is the interpreter's `RunResult::Stopped` payload, so callers see
+/// the same bits from every execution tier. A VM fault is reported as an error
+/// rather than being folded into the status.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub fn run_jit(image: &[u8]) -> Result<i32, JitError> {
+pub fn run_jit64(image: &[u8]) -> Result<u64, JitError> {
     let assembly = emit_assembly(image).map_err(|error| JitError(error.to_string()))?;
     let path = temporary_library_path()?;
     let result = (|| {
@@ -142,9 +159,21 @@ pub fn run_jit(image: &[u8]) -> Result<i32, JitError> {
         if entry.is_null() {
             return Err(dynamic_error("JIT entry symbol is missing"));
         }
-        let function: unsafe extern "C" fn() -> i32 = unsafe { std::mem::transmute(entry) };
+        let function: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(entry) };
         let result = unsafe { function() };
+        // Read the fault word before unloading: a nonzero value means the
+        // generated code faulted rather than reaching `stop`.
+        let fault_word = CString::new(FAULT_SYMBOL).expect("static symbol has no NUL");
+        let fault_pointer = unsafe { dlsym(library.0, fault_word.as_ptr()) };
+        let fault_code = if fault_pointer.is_null() {
+            0
+        } else {
+            unsafe { std::ptr::read_volatile(fault_pointer.cast::<i32>()) }
+        };
         drop(library);
+        if fault_code != 0 {
+            return Err(jit_fault(fault_code));
+        }
         Ok(result)
     })();
     let _ = std::fs::remove_file(&path);
@@ -155,8 +184,19 @@ pub fn run_jit(image: &[u8]) -> Result<i32, JitError> {
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-pub fn run_jit(_image: &[u8]) -> Result<i32, JitError> {
+pub fn run_jit64(_image: &[u8]) -> Result<u64, JitError> {
     Err(JitError(
         "the current JIT requires Linux x86-64 and a local cc toolchain".into(),
     ))
+}
+
+/// Compatibility helper: the low 32 bits of the status, as a signed `i32`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn run_jit(image: &[u8]) -> Result<i32, JitError> {
+    run_jit64(image).map(|status| status as u32 as i32)
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+pub fn run_jit(image: &[u8]) -> Result<i32, JitError> {
+    run_jit64(image).map(|status| status as u32 as i32)
 }

@@ -132,7 +132,10 @@ pub fn definition(name: &str) -> Option<Definition> {
     })
 }
 
-pub fn definition_by_opcode(opcode: u16) -> Option<Definition> {
+/// Canonical mnemonic for `opcode`, if the toolchain defines one.
+///
+/// Used by diagnostics that have to name an instruction they are refusing.
+pub fn mnemonic_for(opcode: u16) -> Option<&'static str> {
     let name = match opcode {
         0x0001 => "nop",
         0x0002 => "break",
@@ -143,10 +146,10 @@ pub fn definition_by_opcode(opcode: u16) -> Option<Definition> {
         0x0007 => "catch",
         0x0008 => "uncatch",
         0x0009 => "raise",
-        0x000A => "flag.direction",
-        0x000B => "address",
-        0x000C => "fence",
-        0x000D => "compare.swap",
+        0x000a => "flag.direction",
+        0x000b => "address",
+        0x000c => "fence",
+        0x000d => "compare.swap",
         0x0010 => "move",
         0x0011 => "extend.s",
         0x0012 => "extend.z",
@@ -191,14 +194,6 @@ pub fn definition_by_opcode(opcode: u16) -> Option<Definition> {
         0x0045 => "store.u16",
         0x0046 => "store.u32",
         0x0047 => "store.u64",
-        0x0080 => "load.acquire.u8",
-        0x0081 => "load.acquire.u16",
-        0x0082 => "load.acquire.u32",
-        0x0083 => "load.acquire.u64",
-        0x0084 => "store.release.u8",
-        0x0085 => "store.release.u16",
-        0x0086 => "store.release.u32",
-        0x0087 => "store.release.u64",
         0x0048 => "rotate.l",
         0x0049 => "rotate.l!",
         0x004a => "rotate.r",
@@ -211,27 +206,39 @@ pub fn definition_by_opcode(opcode: u16) -> Option<Definition> {
         0x0052 => "if.notzero",
         0x0053 => "if.carry",
         0x0054 => "if.nocarry",
+        0x0055 => "call",
+        0x0056 => "tailcall",
+        0x0057 => "sys.region.map",
+        0x0058 => "sys.region.unmap",
+        0x0059 => "sys.port.read",
+        0x005a => "sys.port.write",
+        0x005b => "sys.irq.bind",
+        0x005c => "sys.irq.enable",
+        0x005d => "sys.irq.disable",
+        0x005e => "sys.context.enter",
+        0x005f => "sys.context.return",
+        0x0060 => "exchange",
         0x0061 => "if.sign",
         0x0062 => "if.notsign",
         0x0063 => "if.overflow",
         0x0064 => "if.nooverflow",
         0x0065 => "if.even",
         0x0066 => "if.odd",
-        0x0055 => "call",
-        0x0056 => "tailcall",
-        0x0057 => "sys.region.map",
-        0x0058 => "sys.region.unmap",
-        0x0059 => "sys.port.read",
-        0x005A => "sys.port.write",
-        0x005B => "sys.irq.bind",
-        0x005C => "sys.irq.enable",
-        0x005D => "sys.irq.disable",
-        0x005E => "sys.context.enter",
-        0x005F => "sys.context.return",
-        0x0060 => "exchange",
         0x0067 => "sys.cpu.control",
         0x0068 => "sys.power",
+        0x0080 => "load.acquire.u8",
+        0x0081 => "load.acquire.u16",
+        0x0082 => "load.acquire.u32",
+        0x0083 => "load.acquire.u64",
+        0x0084 => "store.release.u8",
+        0x0085 => "store.release.u16",
+        0x0086 => "store.release.u32",
+        0x0087 => "store.release.u64",
         _ => return None,
     };
-    definition(name)
+    Some(name)
+}
+
+pub fn definition_by_opcode(opcode: u16) -> Option<Definition> {
+    definition(mnemonic_for(opcode)?)
 }

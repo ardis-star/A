@@ -766,10 +766,11 @@ fn avm_div_s() {
         ),
         0xFFFF_FFFF_FFFF_FFF2u64
     );
-    // signed min / -1 faults
+    // signed min / -1 has no representable quotient: it is an overflow fault,
+    // not a divide-by-zero.
     faults(
         "export main\nmain::\n    move R0.q <- -0x8000_0000_0000_0000\n    move R1.q <- -1\n    div.s R2.q, R3.q <- R0.q, R1.q\n    stop\n",
-        AvmError::DivByZero,
+        AvmError::IntegerOverflow,
     );
     // division by zero faults
     faults(
@@ -843,12 +844,21 @@ fn avm_fence() {
 
 #[test]
 fn avm_address() {
-    // address resolves a symbol to its function address
+    // `address` resolves a SYMS index to the named function's address in the
+    // VM's code space (code base + in-image offset). `main` is function 0 and
+    // its code starts at offset 36, after the descriptor table.
     let image = assemble("export main\nmain::\n    address R0.q <- main\n    stop\n").unwrap();
     let mut machine = Avm::load(&image).unwrap();
+    // main is function 0 and its code starts 36 bytes into the CODE section,
+    // after the descriptor table.
+    let expected = (machine.code_base + machine.functions[0].code_offset) as u64;
     machine.run().unwrap();
-    // main is function 0, at code offset 36 (after descriptor table)
-    assert_eq!(machine.registers[0], 36);
+    assert_eq!(machine.registers[0], expected);
+    let assembly = ascension_asm::native::emit_assembly(&image).unwrap_err();
+    assert!(
+        assembly.to_string().contains("address"),
+        "native backends must reject `address` rather than emit a different value: {assembly}"
+    );
 }
 
 #[test]

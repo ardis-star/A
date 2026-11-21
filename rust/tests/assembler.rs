@@ -1423,6 +1423,6 @@ fn cli_run_jit_executes_supported_image() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(String::from_utf8_lossy(&result.stdout).contains("jit returned: 125"));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("jit stopped: 125"));
     std::fs::remove_file(image_path).unwrap();
 }

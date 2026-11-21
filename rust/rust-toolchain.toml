@@ -1,0 +1,7 @@
+[toolchain]
+# Edition 2024 requires Rust 1.85; the code uses `u64::is_multiple_of`, stable
+# in 1.87, which is therefore the real minimum. Pinning the toolchain keeps
+# assembler output and diagnostics reproducible across machines.
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

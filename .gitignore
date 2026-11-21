@@ -65,3 +65,10 @@ credentials/
 # makepkg temporary directories
 /src/
 /pkg/
+
+# Arch Linux packaging — distributed through GitHub Releases
+/PKGBUILD
+/.SRCINFO
+/plus-a-*.pkg.tar.*
+/plus-a-*.src.tar.*
+/plus-a-*.tar.gz*

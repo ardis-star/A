@@ -1,0 +1,7 @@
+export test_views
+test_views::
+    move R0.b <- 0x7F
+    move R1.w <- 0x1234
+    move R2.d <- 0x1234_5678
+    move R3.q <- -1
+    return

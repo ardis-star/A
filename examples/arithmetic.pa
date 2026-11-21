@@ -1,0 +1,11 @@
+unit arithmetic
+export main
+
+main::
+    ;; Compute (40 + 2) * 3 - 1
+    move R0.q <- 40
+    sum! R1.q <- R0.q, 2
+    mul! R2.q <- R1.q, 3
+    diff! R3.q <- R2.q, 1
+    move R0.q <- R3.q
+    stop

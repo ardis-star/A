@@ -1,0 +1,48 @@
+# ASCENSION private documentation
+/md/
+/docs/
+
+# Build and generated artifacts
+/build/
+dist/
+/rust/target/
+*.avm
+*.o
+*.a
+!rust/tests/golden/*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Rust/Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Local tools and caches
+.agent-cache/
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Shell/editor logs and local scratch files
+*.log
+*.tmp
+*.bak
+*.swp
+*~

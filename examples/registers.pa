@@ -1,0 +1,28 @@
+unit registers
+export main
+
+main::
+    ;; Register manipulation: move, exchange, extend, select
+    move R0.b <- 0xAB
+    move R1.w <- 0xCDEF
+    move R2.d <- 0x1234_5678
+    move R3.q <- 0x1122_3344_5566_7788
+
+    ;; Swap R0 and R1
+    exchange R0 <-> R1
+
+    ;; Sign extension: 0x80 as byte -> 0xFFFFFFFFFFFFFF80 as quad
+    move R4.b <- 0x80
+    extend.s R5.q <- R4.b
+
+    ;; Zero extension: 0x80 as byte -> 0x0000000000000080 as quad
+    move R6.b <- 0x80
+    extend.z R7.q <- R6.b
+
+    ;; Select based on zero flag
+    move R8.q <- 0
+    compare! R8.q, 0
+    select R9.q <- zero, 100, 200
+
+    move R0.q <- R9.q
+    stop

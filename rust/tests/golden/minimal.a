@@ -1,0 +1,4 @@
+unit minimal
+export main
+main::
+    return

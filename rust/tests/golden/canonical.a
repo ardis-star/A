@@ -1,0 +1,10 @@
+unit demo
+export boot
+boot::
+    move R0.q <- 42
+    sum! R1.q <- R0.q, 1
+    compare! R1.q, R0.q
+    if.carry -> done
+    store.u64 [R1.q + 8] <- R0.q
+done::
+    return

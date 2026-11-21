@@ -1,0 +1,23 @@
+unit control_flow
+export main
+
+main::
+    move R0.q <- 40
+    call -> add_two
+    move R2.q <- 7
+    move R3.q <- 9
+    exchange R2 <-> R3
+    compare! R0.q, 42
+    if.zero -> success
+    move R0.q <- 99
+    jump -> done
+
+add_two::
+    sum! R0.q <- R0.q, 2
+    return
+
+success::
+    stop
+
+done::
+    stop

@@ -1,0 +1,20 @@
+unit first_program
+export main
+
+main::
+    ;; Calculate (15 * 4) + 2
+    move R0.q <- 15
+    mul! R1.q <- R0.q, 4
+    sum! R2.q <- R1.q, 2
+
+    ;; Check whether result is 62
+    compare! R2.q, 62
+    if.zero -> correct
+
+    ;; Incorrect result
+    move R0.q <- 1
+    stop
+
+correct::
+    move R0.q <- 0
+    stop

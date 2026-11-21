@@ -1,0 +1,7 @@
+unit hello_world
+export main
+
+main::
+    ;; Return a status code as the "hello world" result
+    move R0.q <- 0
+    stop

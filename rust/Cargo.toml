@@ -1,0 +1,20 @@
+[package]
+name = "ascension-assembler"
+version = "1.0.0"
+edition = "2024"
+description = "ASCENSION +A V1.0 language toolchain"
+default-run = "plus-a"
+
+[lib]
+name = "ascension_asm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "plus-a"
+path = "src/main.rs"
+
+[[bin]]
+name = "aa"
+path = "src/bin/aa.rs"
+
+[dependencies]

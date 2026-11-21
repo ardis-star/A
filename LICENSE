@@ -1,0 +1,84 @@
+# ASCENSION SOURCE-AVAILABLE LICENSE
+
+Copyright (c) 2026 ASCENSION. All rights reserved.
+
+ASCENSION and the +A programming language are subject to the following terms.
+
+This is a custom source-available license. It is not an open-source license.
+
+## 1. PERMITTED USE
+
+You are permitted to:
+
+- Download, install, use, and execute the unmodified ASCENSION toolchain.
+- Write, create, modify, compile, execute, and distribute your own +A programs.
+- Distribute `.avm` bytecode and native executables generated from your own programs.
+- Use ASCENSION for personal, educational, research, and commercial purposes.
+
+Your own +A programs and their source code are not restricted by this license.
+
+## 2. REDISTRIBUTION
+
+You may redistribute exact, unmodified copies of the ASCENSION toolchain, source code, and binary releases, provided that you:
+
+- Include this license and all original copyright notices.
+- Preserve all original attribution notices.
+- Clearly identify the distribution as an unmodified copy of ASCENSION.
+- Do not claim ownership of ASCENSION or present yourself as its official maintainer.
+- Do not imply that ASCENSION endorses or officially supports your distribution.
+
+Redistribution through package managers, mirrors, and other distribution platforms is permitted, provided that the copies remain unmodified.
+
+You may not charge a separate license fee for rights granted under this license. This does not prohibit charging for unrelated services or products.
+
+## 3. NO MODIFICATION OF THE IMPLEMENTATION
+
+Without prior written permission from ASCENSION, you may NOT:
+
+- Modify, adapt, patch, or create derivative works of the ASCENSION implementation or its source code.
+- Create or distribute modified versions of the ASCENSION toolchain.
+- Fork the implementation to create or distribute an altered version.
+- Incorporate the ASCENSION implementation into a modified or derivative implementation.
+- Distribute altered, patched, or modified copies of ASCENSION.
+
+These restrictions apply exclusively to the ASCENSION implementation itself.
+
+They do NOT restrict users from creating, modifying, extending, or distributing their own +A programs.
+
+Nothing in this section restricts activities that applicable law expressly permits despite contractual restrictions.
+
+## 4. OWNERSHIP AND TRADEMARKS
+
+The ASCENSION implementation, its source code, and associated project materials remain the property of ASCENSION and/or their respective copyright holders.
+
+The names ASCENSION and +A may not be used to falsely suggest that modified software, unofficial distributions, or derivative products are official ASCENSION releases.
+
+No ownership, trademark, or patent rights are transferred by this license.
+
+## 5. NO WARRANTY
+
+THE ASCENSION TOOLCHAIN IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+YOU USE ASCENSION AT YOUR OWN RISK.
+
+## 6. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, ASCENSION AND ITS CONTRIBUTORS SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THIS LICENSE.
+
+## 7. TERMINATION
+
+Any violation of these terms automatically terminates the permissions granted under this license.
+
+Permissions may be reinstated only through written authorization from ASCENSION.
+
+Termination does not revoke rights that users independently hold in their own +A programs.
+
+## 8. ADDITIONAL PERMISSIONS
+
+Any permissions beyond those expressly granted by this license require prior written authorization from ASCENSION.
+
+---
+
+**ASCENSION**
+
+*Building the foundations of a language family.*

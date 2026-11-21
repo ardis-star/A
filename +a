@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -e
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$DIR/rust/target/release/plus-a"
+if [ ! -f "$BIN" ]; then
+    BIN="$DIR/rust/target/debug/plus-a"
+fi
+if [ ! -f "$BIN" ]; then
+    cargo build --manifest-path "$DIR/rust/Cargo.toml" --quiet --bin plus-a
+    BIN="$DIR/rust/target/debug/plus-a"
+fi
+exec "$BIN" "$@"
